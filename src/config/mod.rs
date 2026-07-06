@@ -1,17 +1,17 @@
 //! Configuration & path resolution.
 //!
-//! The `g` binary lives somewhere on disk; per spec, its data lives in
+//! The `gim` binary lives somewhere on disk; per spec, its data lives in
 //! a `data/` directory next to the binary. We resolve this once at
 //! startup and never re-compute it.
 
 use crate::error::{GError, GResult};
 use std::path::{Path, PathBuf};
 
-/// Resolved global configuration: where the `g` binary lives, where
+/// Resolved global configuration: where the `gim` binary lives, where
 /// its `data/` directory is, and where the global `games.db` is.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// Directory containing the `g` executable (or, if overridden, the
+    /// Directory containing the `gim` executable (or, if overridden, the
     /// user-specified data root).
     pub binary_dir: PathBuf,
     /// `data/` directory next to the binary (or the override).
@@ -24,10 +24,6 @@ pub struct Paths {
 
 impl Paths {
     /// Resolve paths from the current executable location.
-    ///
-    /// Falls back to `current_exe()`'s parent, which is reliable on
-    /// Linux, macOS, and Windows. If `/proc/self/exe` is unavailable
-    /// (extremely rare), we fall back to the current working directory.
     pub fn from_env() -> GResult<Self> {
         let exe = std::env::current_exe()
             .map_err(|e| GError::Config(format!("cannot locate current exe: {e}")))?;
@@ -35,7 +31,6 @@ impl Paths {
             .parent()
             .ok_or_else(|| GError::Config("exe has no parent directory".into()))?
             .to_path_buf();
-
         Self::from_binary_dir(binary_dir)
     }
 
@@ -52,7 +47,7 @@ impl Paths {
         })
     }
 
-    /// Override the data root (for `G_DATA_DIR` env var, tests, etc.).
+    /// Override the data root (for `GIM_DATA_DIR` env var, tests, etc.).
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.games_db = data_dir.join("games.db");
         self.global_gignore = data_dir.join("gignore");
@@ -94,9 +89,8 @@ impl Paths {
     }
 }
 
-/// Read the `G_DATA_DIR` environment variable if set, and use it to
-/// override the default data directory. Useful for tests and for users
-/// who want to relocate their `data/` folder.
+/// Read the `GIM_DATA_DIR` environment variable if set, and use it to
+/// override the default data directory.
 pub fn env_data_dir_override() -> Option<PathBuf> {
-    std::env::var_os("G_DATA_DIR").map(PathBuf::from)
+    std::env::var_os("GIM_DATA_DIR").map(PathBuf::from)
 }

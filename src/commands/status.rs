@@ -1,19 +1,17 @@
-//! `g status` — show file changes since the last snapshot.
+//! `gim status` — show file changes since the last snapshot.
 //!
-//! Per spec, compares current on-disk state with the latest snapshot:
-//! - Modified: file exists in both, hash differs (yellow)
-//! - Added: file in current but not in snapshot (green)
-//! - Deleted: file in snapshot but not in current (red)
+//! Uses the mtime+size fast pre-filter: only files whose size or mtime
+//! differs from the last snapshot are re-hashed. Files whose size+mtime
+//! match are assumed unchanged. Pass `--full-hash` to bypass the
+//! pre-filter.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{diff_states, GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
-use crate::hashing::Hash;
 use crate::ignore_mod;
 use crate::output::Colorizer;
 use crate::walker::{walk_and_hash, WalkOptions};
 use serde::Serialize;
-use std::collections::HashMap;
 
 #[derive(Serialize)]
 struct StatusJson {
@@ -29,6 +27,7 @@ pub fn run(
     alias: String,
     threads: Option<usize>,
     json: bool,
+    full_hash: bool,
 ) -> GResult<()> {
     let mut paths = Paths::from_env()?;
     if let Some(override_dir) = env_data_dir_override() {
@@ -49,19 +48,27 @@ pub fn run(
     let last_snapshot_id = latest.snapshot_id.clone();
     let parent_files = snaps_db.files_for_snapshot(&last_snapshot_id)?;
 
-    // Walk & hash current state
     let ignore_set = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
     let walk_opts = WalkOptions {
         threads: threads.unwrap_or(0),
+        full_hash,
         ..WalkOptions::default()
     };
-    let (hashed, _locked) = walk_and_hash(&game.game_dir, &ignore_set, &walk_opts)?;
-    let mut current_map: HashMap<String, (Hash, i64)> = HashMap::with_capacity(hashed.len());
+    let reference = if full_hash { None } else { Some(&parent_files) };
+    let (hashed, _locked) = walk_and_hash(&game.game_dir, &ignore_set, reference, &walk_opts)?;
+
+    let mut current_map = std::collections::HashMap::with_capacity(hashed.len());
     for f in hashed {
-        current_map.insert(f.file_path, (f.hash, f.file_size));
+        current_map.insert(
+            f.file_path,
+            crate::db::FileMeta {
+                hash: f.hash,
+                file_size: f.file_size,
+                modified_time: f.modified_time,
+            },
+        );
     }
 
-    // Diff: current vs last snapshot
     let diff = diff_states(&parent_files, &current_map);
 
     if json {
@@ -77,12 +84,14 @@ pub fn run(
         return Ok(());
     }
 
-    // Default output
     println!(
         "{} status (vs last snapshot: {})",
         colorizer.bold(&alias),
         last_snapshot_id
     );
+    if full_hash {
+        println!("  (full-hash mode: every file was re-hashed)");
+    }
     println!();
     if diff.added.is_empty() && diff.modified.is_empty() && diff.deleted.is_empty() {
         println!("  no changes");

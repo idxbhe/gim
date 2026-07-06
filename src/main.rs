@@ -1,15 +1,10 @@
-//! `g` binary entry point.
-//!
-//! Thin wrapper around the library: parse CLI args, dispatch to the
-//! matching command, and translate any error into a user-facing
-//! message + exit code.
+//! `gim` binary entry point.
 
 use clap::Parser;
 use gim::cli::Cli;
 use gim::commands;
 
 fn main() {
-    // Initialize logging (controlled by -v / -vv / -vvv flags).
     let cli = Cli::parse();
     let log_level = match cli.verbose {
         0 => "warn",

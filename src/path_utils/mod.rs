@@ -19,13 +19,6 @@ use std::path::{Component, Path, PathBuf};
 /// Returns a `String` (not `PathBuf`) because the result is a POSIX-style
 /// relative path that we want to store verbatim in SQLite and compare by
 /// exact string equality.
-///
-/// # Errors
-///
-/// Returns [`GError::Path`] if:
-/// - The file path is not inside the game root.
-/// - The path contains non-UTF-8 components.
-/// - The path contains no relative components after the game root.
 pub fn normalize(game_root: &Path, file_path: &Path) -> GResult<String> {
     let rel = if file_path.is_absolute() {
         file_path
@@ -53,10 +46,8 @@ pub fn normalize(game_root: &Path, file_path: &Path) -> GResult<String> {
                 })?;
                 parts.push(s);
             }
-            Component::CurDir => {} // skip "."
+            Component::CurDir => {}
             Component::ParentDir => {
-                // Should not happen for files inside the game root, but
-                // be defensive: pop the last segment if any.
                 if !parts.is_empty() {
                     parts.pop();
                 }
@@ -90,23 +81,19 @@ pub fn denormalize(game_root: &Path, normalized: &str) -> PathBuf {
     p
 }
 
-/// Determine the object-store path for a given hash.
-///
-/// Per spec, objects are stored as `objects/[hash_prefix]/[hash]` where
-/// `hash_prefix` is the first 2 characters of the hash.
-pub fn object_path(objects_dir: &Path, hash: &str) -> PathBuf {
-    debug_assert!(
-        hash.len() >= 2,
-        "hash must be at least 2 chars, got {hash}"
-    );
-    let prefix = &hash[..2];
-    objects_dir.join(prefix).join(hash)
-}
-
 /// Return the 2-character prefix for a hash (used for prefix-based directory
 /// sharding in the object store).
 pub fn hash_prefix(hash: &str) -> &str {
     &hash[..2]
+}
+
+/// Determine the object-store path for a given hash.
+///
+/// Per spec, objects are stored as `objects/[hash_prefix]/[hash]`.
+pub fn object_path(objects_dir: &Path, hash: &str) -> PathBuf {
+    debug_assert!(hash.len() >= 2, "hash must be at least 2 chars, got {hash}");
+    let prefix = &hash[..2];
+    objects_dir.join(prefix).join(hash)
 }
 
 #[cfg(test)]

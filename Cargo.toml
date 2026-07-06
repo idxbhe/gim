@@ -1,12 +1,12 @@
 [package]
 name = "gim"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
-authors = ["g contributors"]
+authors = ["gim contributors"]
 license = "MIT"
 description = "Game files version control tool — git for game directories"
-repository = "https://example.com/g"
+repository = "https://example.com/gim"
 readme = "README.md"
 keywords = ["cli", "version-control", "games", "snapshot", "backup"]
 categories = ["command-line-utilities"]
@@ -54,6 +54,10 @@ serde_json = "1.0.132"
 
 # Time
 chrono = { version = "0.4.38", features = ["serde", "clock"] }
+
+# File mtime manipulation (set mtime on restored files so subsequent
+# status/snap can use the mtime+size fast pre-filter)
+filetime = "0.2.25"
 
 # File locking (advisory)
 fs2 = "0.4.3"

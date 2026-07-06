@@ -1,24 +1,17 @@
 //! Ignore-pattern matching — gitignore-compatible.
 //!
-//! Per spec, ignore patterns come from three sources (all merged):
-//! 1. **Built-in defaults** (`*.tmp`, `*.temp`, `*.bak`, `*.swp`, `Thumbs.db`,
-//!    `.DS_Store`, `desktop.ini`) — always applied, cannot be overridden.
-//! 2. **Global `data/gignore`** — applies to all games.
-//! 3. **Per-game `data/[alias]/.gignore`** — applies to a specific game.
-//! 4. **In-game `[gameDir]/.gignore`** — lives inside the game directory.
-//!
-//! Pattern syntax follows gitignore semantics (negations with `!`,
-//! directory-suffix `/`, glob wildcards). We use the `ignore` crate's
-//! `Gitignore` parser, which is the same one `ripgrep` uses and is
-//! battle-tested.
+//! Per spec, ignore patterns come from four sources (all merged):
+//! 1. Built-in defaults — always applied, cannot be overridden.
+//! 2. Global `data/gignore` — applies to all games.
+//! 3. Per-game `data/[alias]/.gignore` — applies to a specific game.
+//! 4. In-game `[gameDir]/.gignore` — lives inside the game directory.
 
 use crate::config::Paths;
 use crate::error::{GError, GResult};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
-/// Built-in default patterns that are always applied. Users may append
-/// to these via `data/gignore`, but cannot override them.
+/// Built-in default patterns that are always applied.
 pub const DEFAULT_PATTERNS: &[&str] = &[
     "*.tmp",
     "*.temp",
@@ -33,11 +26,11 @@ pub const DEFAULT_PATTERNS: &[&str] = &[
 /// file paths against.
 pub struct IgnoreSet {
     matcher: Gitignore,
-    /// Human-readable source labels, for `g ignore --list`.
+    /// Human-readable source labels, for `gim ignore --list`.
     pub sources: Vec<IgnoreSource>,
 }
 
-/// A named source of ignore patterns (used by `g ignore --list`).
+/// A named source of ignore patterns (used by `gim ignore --list`).
 #[derive(Debug, Clone)]
 pub struct IgnoreSource {
     pub label: String,
@@ -45,7 +38,6 @@ pub struct IgnoreSource {
 }
 
 impl IgnoreSet {
-    /// Build an empty ignore set (no patterns). Used as a starting point.
     pub fn empty() -> GResult<Self> {
         let matcher = GitignoreBuilder::new("");
         let matcher = matcher.build()?;
@@ -61,8 +53,6 @@ impl IgnoreSet {
         let mut kept: Vec<String> = Vec::with_capacity(lines.len());
         for raw in lines {
             let trimmed = raw.trim();
-            // Skip comments and blank lines (but keep them in the listing
-            // output for readability).
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
@@ -74,9 +64,8 @@ impl IgnoreSet {
             }
             kept.push(raw.clone());
         }
-        // Merge with existing matcher: re-build from accumulated lines.
-        // Gitignore doesn't support incremental merge, so we re-create the
-        // full matcher from scratch each time.
+        // Re-build the full matcher from scratch (Gitignore doesn't
+        // support incremental merge).
         let merged = if self.sources.is_empty() {
             builder.build()?
         } else {
@@ -100,7 +89,7 @@ impl IgnoreSet {
     }
 
     /// Add patterns from a file on disk. Skips silently if the file does
-    /// not exist (all ignore files are optional per spec).
+    /// not exist.
     pub fn add_file(&mut self, root: &Path, label: &str, path: &Path) -> GResult<()> {
         if !path.exists() {
             return Ok(());
@@ -110,14 +99,8 @@ impl IgnoreSet {
         self.add_lines(root, label, &lines)
     }
 
-    /// Test whether a relative path (forward-slash style) should be ignored.
-    ///
-    /// `is_dir` indicates whether the path is a directory (affects whether
-    /// patterns ending in `/` match).
+    /// Test whether a relative path should be ignored.
     pub fn is_ignored(&self, relative_path: &str, is_dir: bool) -> bool {
-        // Gitignore::matched expects a path relative to its root. Since we
-        // always feed it the normalized (forward-slash, relative) form,
-        // this works regardless of platform.
         let p = Path::new(relative_path);
         match self.matcher.matched(p, is_dir) {
             ignore::Match::Ignore(_) => true,
@@ -127,26 +110,21 @@ impl IgnoreSet {
     }
 }
 
-/// Build the complete ignore set for a game: built-in defaults + global
-/// gignore + per-game gignore + in-game gignore.
+/// Build the complete ignore set for a game.
 pub fn build_for_game(paths: &Paths, alias: &str, game_dir: &Path) -> GResult<IgnoreSet> {
     let mut set = IgnoreSet::empty()?;
 
-    // 1. Built-in defaults — always applied.
     let defaults: Vec<String> = DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect();
     set.add_lines(game_dir, "# Global defaults (built-in)", &defaults)?;
 
-    // 2. Global gignore (data/gignore)
     set.add_file(game_dir, "# Global gignore (data/gignore)", &paths.global_gignore)?;
 
-    // 3. Per-game gignore (data/[alias]/.gignore)
     set.add_file(
         game_dir,
         &format!("# Per-game (data/{alias}/.gignore)"),
         &paths.per_game_gignore(alias),
     )?;
 
-    // 4. In-game gignore (gameDir/.gignore)
     set.add_file(
         game_dir,
         "# In-game (gameDir/.gignore)",
@@ -176,15 +154,9 @@ mod tests {
 
     #[test]
     fn matches_dir_pattern() {
-        // `logs/` matches the directory `logs` itself (when is_dir=true).
-        // The walker then prunes the entire subtree, so files inside
-        // are never visited. Per gitignore semantics, a directory-only
-        // pattern does NOT match a file path directly.
         let s = build(&["logs/"]);
-        assert!(s.is_ignored("logs", true)); // dir itself
-        assert!(!s.is_ignored("logs.txt", false)); // unrelated file
-        // `logs/foo.txt` would not be tested directly in practice —
-        // the walker prunes `logs` before descending into it.
+        assert!(s.is_ignored("logs", true));
+        assert!(!s.is_ignored("logs.txt", false));
     }
 
     #[test]

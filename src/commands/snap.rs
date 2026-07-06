@@ -1,17 +1,23 @@
-//! `g snap` — take a snapshot of the game directory.
+//! `gim snap` — take a snapshot of the game directory.
 //!
-//! This is the core command. Per spec, the pipeline is:
+//! Pipeline (v0.2 with mtime+size pre-filter):
 //! 1. VALIDATE — alias, gameDir, advisory lock.
-//! 2. SCAN — walk + apply ignore patterns.
-//! 3. HASH — parallel XXH3 hashing, with retry on locked files.
-//! 4. DIFF — against parent snapshot's file map.
+//! 2. WALK+STAT — walk + apply ignore patterns, collect (path, size,
+//!    mtime) for each surviving file. No file content I/O in this pass.
+//! 3. SMART HASH — for each file:
+//!    - Not in parent snapshot → hash (new file).
+//!    - In parent, but size or mtime differs → hash to verify.
+//!    - In parent AND size+mtime match → SKIP hashing, reuse parent's hash.
+//!    If `--full-hash` was passed, hash everything unconditionally.
+//! 4. DIFF — against parent snapshot's file map (hash-based).
 //! 5. PREVIEW — if `--dry-run`, print diff and exit.
 //! 6. STORE — atomic transaction: copy new/modified objects to CAS,
-//!    insert into `files` and `deleted_files`, insert `snaps` row.
-//! 7. REPORT — print summary or "no changes detected".
+//!    insert into `files` (with mtime) and `deleted_files`, insert
+//!    `snaps` row.
+//! 7. REPORT.
 
 use crate::config::{env_data_dir_override, Paths};
-use crate::db::{diff_states, FileEntry, GamesDb, SnapsDb};
+use crate::db::{diff_states, FileEntry, FileMeta, GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::hashing::Hash;
 use crate::ignore_mod;
@@ -29,6 +35,7 @@ pub fn run(
     msg: Option<String>,
     threads: Option<usize>,
     dry_run: bool,
+    full_hash: bool,
 ) -> GResult<()> {
     // ── 1. VALIDATE ─────────────────────────────────────────────────
     let mut paths = Paths::from_env()?;
@@ -52,7 +59,6 @@ pub fn run(
     let snaps_db_path = paths.snaps_db(&alias);
     let mut snaps_db = SnapsDb::open(&snaps_db_path)?;
 
-    // Acquire advisory lock — prevents concurrent snap/restore.
     let _lock = locking::acquire_game_lock(&alias, &snaps_db_path)?;
 
     // ── Resolve snapshot ID & parent ────────────────────────────────
@@ -73,36 +79,45 @@ pub fn run(
         },
     };
 
-    // ── 2. SCAN + 3. HASH ────────────────────────────────────────────
+    // ── 2. WALK + 3. SMART HASH ──────────────────────────────────────
     let ignore_set = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
-    let walk_opts = WalkOptions {
-        threads: threads.unwrap_or(0),
-        ..WalkOptions::default()
-    };
-    let (hashed_files, locked_files) = walk_and_hash(&game.game_dir, &ignore_set, &walk_opts)?;
-
-    // Build current_state map
-    let mut current_state: HashMap<String, (Hash, i64)> = HashMap::with_capacity(hashed_files.len());
-    for f in &hashed_files {
-        current_state.insert(f.file_path.clone(), (f.hash.clone(), f.file_size));
-    }
-
-    // ── 4. DIFF against parent snapshot ─────────────────────────────
-    let parent_files = match &parent_id {
+    let parent_files: HashMap<String, FileMeta> = match &parent_id {
         Some(pid) => snaps_db.files_for_snapshot(pid)?,
         None => HashMap::new(),
     };
+    let walk_opts = WalkOptions {
+        threads: threads.unwrap_or(0),
+        full_hash,
+        ..WalkOptions::default()
+    };
+    // Smart walk: pass parent_files as reference. If full_hash is true,
+    // the walker will ignore the reference and hash everything.
+    let reference = if full_hash { None } else { Some(&parent_files) };
+    let (hashed_files, locked_files) =
+        walk_and_hash(&game.game_dir, &ignore_set, reference, &walk_opts)?;
+
+    // Build current_state map: path → (hash, size, mtime)
+    let mut current_state: HashMap<String, FileMeta> = HashMap::with_capacity(hashed_files.len());
+    for f in &hashed_files {
+        current_state.insert(
+            f.file_path.clone(),
+            FileMeta {
+                hash: f.hash.clone(),
+                file_size: f.file_size,
+                modified_time: f.modified_time,
+            },
+        );
+    }
+
+    // ── 4. DIFF against parent snapshot ─────────────────────────────
     let diff = diff_states(&parent_files, &current_state);
 
     // ── 5. PREVIEW (if --dry-run) ───────────────────────────────────
     if dry_run {
-        print_dry_run(&alias, &snapshot_id, &diff, &locked_files, colorizer);
+        print_dry_run(&alias, &snapshot_id, &diff, &locked_files, colorizer, full_hash);
         return Ok(());
     }
 
-    // ── If no changes, skip ──────────────────────────────────────────
-    // Locked files are excluded from the snapshot — if all tracked files
-    // are unchanged, we skip even if some locked files were present.
     if diff.total_changes() == 0 {
         println!("no changes detected, snapshot skipped");
         return Ok(());
@@ -113,16 +128,12 @@ pub fn run(
     cas.ensure()?;
 
     // 6a. Copy new/modified objects to CAS.
-    // We do this outside the DB transaction (file I/O) but track what
-    // we wrote so we can clean up on failure.
     let mut written_objects: Vec<(Hash, i64)> = Vec::new();
     let new_or_modified: Vec<&crate::walker::HashedFile> = hashed_files
         .iter()
-        .filter(|f| {
-            match parent_files.get(&f.file_path) {
-                None => true,                      // added
-                Some((ph, _)) => ph != &f.hash,    // modified
-            }
+        .filter(|f| match parent_files.get(&f.file_path) {
+            None => true,
+            Some(pm) => pm.hash != f.hash,
         })
         .collect();
 
@@ -132,7 +143,6 @@ pub fn run(
             match cas.store_from(&abs_path, &f.hash) {
                 Ok(()) => written_objects.push((f.hash.clone(), f.file_size)),
                 Err(e) => {
-                    // Rollback: delete any objects we already wrote.
                     for (h, _) in &written_objects {
                         let _ = cas.delete(h.as_str());
                     }
@@ -155,13 +165,13 @@ pub fn run(
             diff.added_size(),
         )?;
 
-        // Build FileEntry list for ALL files in current state
         let all_files: Vec<FileEntry> = hashed_files
             .iter()
             .map(|f| FileEntry {
                 file_path: f.file_path.clone(),
                 hash: f.hash.clone(),
                 file_size: f.file_size,
+                modified_time: f.modified_time,
             })
             .collect();
         SnapsDb::insert_files(&tx, &snapshot_id, &all_files)?;
@@ -171,7 +181,6 @@ pub fn run(
     };
 
     if let Err(e) = tx_result {
-        // Rollback CAS writes
         for (h, _) in &written_objects {
             let _ = cas.delete(h.as_str());
         }
@@ -194,7 +203,6 @@ pub fn run(
         format_size(added_size)
     );
 
-    // Locked-file warnings
     if !locked_files.is_empty() {
         println!();
         println!(
@@ -209,17 +217,22 @@ pub fn run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_dry_run(
     alias: &str,
     snapshot_id: &str,
     diff: &crate::db::Diff,
     locked_files: &[crate::walker::LockedFile],
     colorizer: &Colorizer,
+    full_hash: bool,
 ) {
     println!(
         "dry run: would snapshot {alias} as {id}",
         id = colorizer.bold(snapshot_id)
     );
+    if full_hash {
+        println!("  (full-hash mode: every file was re-hashed)");
+    }
     println!();
     println!("  added ({}):", diff.added.len());
     for f in &diff.added {
@@ -246,8 +259,6 @@ fn print_dry_run(
     }
 }
 
-/// Validate a custom snapshot ID. Per spec, snapshot IDs are used as
-/// filesystem-safe identifiers and as DB primary keys.
 fn validate_snapshot_id(id: &str) -> GResult<()> {
     if id.is_empty() || id.starts_with('.') {
         return Err(GError::InvalidSnapshotId(id.to_string()));

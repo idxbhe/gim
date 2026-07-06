@@ -13,10 +13,9 @@ pub mod schema;
 pub mod snaps;
 
 pub use games::GamesDb;
-pub use snaps::{diff_states, Diff, FileEntry, Snap, SnapsDb};
+pub use snaps::{diff_states, Diff, FileEntry, FileMeta, Snap, SnapsDb};
 
 /// Apply the standard set of SQLite pragmas to a fresh connection.
-/// These are shared by both `games.db` and `snaps.db`.
 pub(crate) fn apply_pragmas(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;

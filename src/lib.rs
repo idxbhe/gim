@@ -1,11 +1,10 @@
-//! `g` — Game Files Version Control Tool.
+//! `gim` — Game Files Version Control Tool.
 //!
 //! A CLI tool for versioning game files. Similar to git, but
 //! purpose-built for game directories. Uses SQLite for metadata and
 //! XXH3 for fast file hashing.
 //!
-//! This crate is structured as a library (so integration tests and
-//! future tooling can reuse the modules) with a thin `main.rs` binary
+//! This crate is structured as a library with a thin `main.rs` binary
 //! that wires CLI parsing to command implementations.
 
 pub mod cli;

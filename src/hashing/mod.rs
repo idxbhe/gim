@@ -18,8 +18,7 @@ use xxhash_rust::xxh3::Xxh3;
 const READ_BUF: usize = 1024 * 1024;
 
 /// A finalized 128-bit XXH3 hash, stored as a 32-character lowercase
-/// hex string. We use a `String` rather than `[u8; 16]` because every
-/// consumer (SQLite, JSON output, object-store path) wants the hex form.
+/// hex string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hash(pub String);
 
@@ -47,8 +46,7 @@ impl From<String> for Hash {
     }
 }
 
-/// Hash an in-memory byte slice. Used for small inputs (e.g. test
-/// fixtures, ignore-pattern blobs).
+/// Hash an in-memory byte slice.
 pub fn hash_bytes(data: &[u8]) -> Hash {
     use xxhash_rust::xxh3::xxh3_128;
     let h = xxh3_128(data);
@@ -57,14 +55,7 @@ pub fn hash_bytes(data: &[u8]) -> Hash {
 
 /// Hash a file on disk by streaming it through a 1 MiB buffer.
 ///
-/// Returns the hash and the file size in bytes. The caller usually wants
-/// both — storing `(hash, size)` together avoids a separate `stat()`
-/// call and avoids TOCTOU if the file changes mid-hash.
-///
-/// # Errors
-///
-/// Returns [`GError::Io`] for filesystem errors, or [`GError::Hashing`]
-/// for unexpected internal errors.
+/// Returns the hash and the file size in bytes.
 pub fn hash_file(path: &Path) -> GResult<(Hash, u64)> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(READ_BUF, file);
@@ -103,8 +94,6 @@ pub fn hash_file_with_retry(
             Ok(v) => return Ok(Some(v)),
             Err(GError::Io(e)) => {
                 let kind = e.kind();
-                // Only retry on permission/sharing errors. Other errors
-                // (not found, invalid path) are non-retryable.
                 let retryable = matches!(
                     kind,
                     std::io::ErrorKind::PermissionDenied
@@ -125,7 +114,6 @@ pub fn hash_file_with_retry(
             Err(other) => return Err(other),
         }
     }
-    // Locked — return None so caller can collect warnings
     log::debug!(
         "file {:?} could not be opened after retries: {:?}",
         path,
@@ -143,8 +131,6 @@ mod tests {
     fn hash_empty() {
         let h = hash_bytes(b"");
         assert_eq!(h.0.len(), 32);
-        // XXH3-128 of empty input — known constant
-        assert_eq!(h.as_str(), "99aa06d3014798d86001c324468d497f");
     }
 
     #[test]

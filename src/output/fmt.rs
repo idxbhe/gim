@@ -4,8 +4,6 @@ use chrono::{DateTime, Utc};
 
 /// Format a byte count as a human-readable string with one decimal
 /// place (e.g. `1.2 KB`, `45 MB`, `2.3 GB`).
-///
-/// Uses binary units (1024-based) per common file-manager convention.
 pub fn format_size(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -25,8 +23,7 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
-/// Compact size format without space (e.g. `+45MB`, `-2GB`), used in
-/// `g log --oneline` and `g diff --stat` per spec examples.
+/// Compact size format without space (e.g. `+45MB`, `-2GB`).
 pub fn format_size_compact(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -52,11 +49,10 @@ pub fn format_size_compact(bytes: i64) -> String {
 /// Format a Unix-millisecond timestamp as `YYYY-MM-DD HH:MM:SS` (UTC).
 pub fn format_timestamp(ms: i64) -> String {
     let secs = ms / 1000;
-    let dt = DateTime::<Utc>::from_timestamp(secs, 0)
+    DateTime::<Utc>::from_timestamp(secs, 0)
         .unwrap_or_default()
         .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
-    dt
+        .to_string()
 }
 
 #[cfg(test)]

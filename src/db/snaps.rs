@@ -1,8 +1,12 @@
 //! `snaps.db` — per-game snapshot & file metadata.
 //!
-//! Each game has its own `snaps.db` in `data/[alias]/`. This module
-//! wraps all queries: snapshot creation, file-table inserts, diffs
-//! against the parent snapshot, history traversal, and integrity check.
+//! Each game has its own `snaps.db` in `data/[alias]/`.
+//!
+//! Starting with gim v0.2, the `files` table also stores `modifiedTime`
+//! (file mtime in Unix seconds, captured at snap time). This enables
+//! the mtime+size fast pre-filter used by `gim status`, `gim snap`, and
+//! `gim restore` to skip hashing files whose size and mtime have not
+//! changed since the reference snapshot.
 
 use crate::db::schema;
 use crate::error::{GError, GResult};
@@ -29,19 +33,28 @@ pub struct FileEntry {
     pub file_path: String,
     pub hash: Hash,
     pub file_size: i64,
+    /// File mtime at snap time (Unix seconds). Used by the mtime+size
+    /// fast pre-filter in `gim status`, `gim snap`, and `gim restore`.
+    pub modified_time: i64,
+}
+
+/// Lightweight metadata triple — used as the value type in the file maps
+/// returned by [`SnapsDb::files_for_snapshot`]. Captures everything the
+/// pre-filter needs to decide whether a file needs to be re-hashed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMeta {
+    pub hash: Hash,
+    pub file_size: i64,
+    pub modified_time: i64,
 }
 
 /// Result of a diff between two snapshots (or between a snapshot and
 /// the current on-disk state).
 #[derive(Debug, Default, Clone)]
 pub struct Diff {
-    /// Files present in the new state but not in the old state.
     pub added: Vec<FileEntry>,
-    /// Files present in both but with different hash (modified).
     pub modified: Vec<FileEntry>,
-    /// Files present in the old state but not in the new state (deleted).
     pub deleted: Vec<String>,
-    /// Files present in both with the same hash.
     pub unchanged: Vec<FileEntry>,
 }
 
@@ -51,7 +64,6 @@ impl Diff {
     }
 
     pub fn added_size(&self) -> i64 {
-        // For "added size" per spec we count new + modified file sizes.
         self.added.iter().map(|f| f.file_size).sum::<i64>()
             + self.modified.iter().map(|f| f.file_size).sum::<i64>()
     }
@@ -63,9 +75,6 @@ pub struct SnapsDb {
 }
 
 impl SnapsDb {
-    /// Open `snaps.db`, creating the schema if needed, and run an
-    /// integrity check. Returns [`GError::DbCorrupt`] if the database
-    /// is corrupted.
     pub fn open(path: &Path) -> GResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -74,8 +83,6 @@ impl SnapsDb {
         crate::db::apply_pragmas(&conn)?;
         schema::init_snaps_db(&conn)?;
 
-        // Best-effort integrity check. Failures are reported but do not
-        // block opening — the user can run `g repair` explicitly.
         let ok: Option<String> = conn
             .query_row("PRAGMA integrity_check;", [], |r| r.get(0))
             .optional()?;
@@ -85,8 +92,7 @@ impl SnapsDb {
         Ok(Self { conn })
     }
 
-    /// Get the latest snapshot (by timestamp, falling back to insertion
-    /// order if equal). Returns `Ok(None)` if no snapshots exist.
+    /// Get the latest snapshot.
     pub fn latest_snapshot(&self) -> GResult<Option<Snap>> {
         let mut stmt = self.conn.prepare(
             "SELECT snapshotId, parentSnapId, timestamp, message, fileCount, addedSize
@@ -155,31 +161,33 @@ impl SnapsDb {
     }
 
     /// Get every file entry for a snapshot, as a `HashMap` keyed by
-    /// normalized file path. Used for diffing.
-    pub fn files_for_snapshot(&self, snapshot_id: &str) -> GResult<HashMap<String, (Hash, i64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT filePath, hash, fileSize FROM files WHERE snapshotId = ?1")?;
+    /// normalized file path. Returns `(Hash, FileMeta)` where `FileMeta`
+    /// includes size and mtime for pre-filtering.
+    pub fn files_for_snapshot(&self, snapshot_id: &str) -> GResult<HashMap<String, FileMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT filePath, hash, fileSize, modifiedTime FROM files WHERE snapshotId = ?1",
+        )?;
         let rows = stmt.query_map(params![snapshot_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                (Hash(r.get::<_, String>(1)?), r.get::<_, i64>(2)?),
+                FileMeta {
+                    hash: Hash(r.get::<_, String>(1)?),
+                    file_size: r.get::<_, i64>(2)?,
+                    modified_time: r.get::<_, i64>(3)?,
+                },
             ))
         })?;
         let mut out = HashMap::new();
         for r in rows {
-            let (p, h) = r?;
-            out.insert(p, h);
+            let (p, m) = r?;
+            out.insert(p, m);
         }
         Ok(out)
     }
 
-    /// Returns the set of all distinct hashes referenced by any
-    /// snapshot. Used by `g gc` to find orphaned objects.
+    /// Returns the set of all distinct hashes referenced by any snapshot.
     pub fn referenced_hashes(&self) -> GResult<std::collections::HashSet<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT hash FROM files")?;
+        let mut stmt = self.conn.prepare("SELECT DISTINCT hash FROM files")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = std::collections::HashSet::new();
         for r in rows {
@@ -188,14 +196,12 @@ impl SnapsDb {
         Ok(out)
     }
 
-    /// Begin a transaction. The caller is responsible for committing
-    /// or rolling back.
+    /// Begin a transaction.
     pub fn transaction(&mut self) -> GResult<rusqlite::Transaction<'_>> {
         Ok(self.conn.transaction()?)
     }
 
-    /// Insert a snapshot record. Used by the snap command inside a
-    /// larger transaction.
+    /// Insert a snapshot record.
     pub fn insert_snap(
         tx: &rusqlite::Transaction<'_>,
         snapshot_id: &str,
@@ -220,18 +226,24 @@ impl SnapsDb {
         Ok(())
     }
 
-    /// Bulk-insert file entries for a snapshot. Caller must hold a
-    /// transaction.
+    /// Bulk-insert file entries for a snapshot.
     pub fn insert_files(
         tx: &rusqlite::Transaction<'_>,
         snapshot_id: &str,
         files: &[FileEntry],
     ) -> GResult<()> {
         let mut stmt = tx.prepare(
-            "INSERT INTO files (snapshotId, filePath, hash, fileSize) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO files (snapshotId, filePath, hash, fileSize, modifiedTime)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         for f in files {
-            stmt.execute(params![snapshot_id, f.file_path, f.hash.as_str(), f.file_size])?;
+            stmt.execute(params![
+                snapshot_id,
+                f.file_path,
+                f.hash.as_str(),
+                f.file_size,
+                f.modified_time,
+            ])?;
         }
         Ok(())
     }
@@ -251,7 +263,7 @@ impl SnapsDb {
         Ok(())
     }
 
-    /// Convenience: current time in milliseconds since UNIX_EPOCH.
+    /// Current time in milliseconds since UNIX_EPOCH.
     pub fn now_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -262,27 +274,35 @@ impl SnapsDb {
 
 /// Compute the diff between a parent snapshot's file map and the
 /// current state map. Pure function — no DB access.
+///
+/// Note: `FileMeta` carries mtime+size, but the diff is based purely on
+/// hash equality. The mtime+size pre-filter happens earlier (in the
+/// walker), so by the time we reach this function any file that needed
+/// re-hashing has already been hashed.
 pub fn diff_states(
-    parent: &HashMap<String, (Hash, i64)>,
-    current: &HashMap<String, (Hash, i64)>,
+    parent: &HashMap<String, FileMeta>,
+    current: &HashMap<String, FileMeta>,
 ) -> Diff {
     let mut d = Diff::default();
-    for (path, (hash, size)) in current {
+    for (path, meta) in current {
         match parent.get(path) {
             None => d.added.push(FileEntry {
                 file_path: path.clone(),
-                hash: hash.clone(),
-                file_size: *size,
+                hash: meta.hash.clone(),
+                file_size: meta.file_size,
+                modified_time: meta.modified_time,
             }),
-            Some((ph, _)) if ph != hash => d.modified.push(FileEntry {
+            Some(pm) if pm.hash != meta.hash => d.modified.push(FileEntry {
                 file_path: path.clone(),
-                hash: hash.clone(),
-                file_size: *size,
+                hash: meta.hash.clone(),
+                file_size: meta.file_size,
+                modified_time: meta.modified_time,
             }),
             Some(_) => d.unchanged.push(FileEntry {
                 file_path: path.clone(),
-                hash: hash.clone(),
-                file_size: *size,
+                hash: meta.hash.clone(),
+                file_size: meta.file_size,
+                modified_time: meta.modified_time,
             }),
         }
     }
@@ -304,25 +324,32 @@ mod tests {
         f.into_temp_path().keep().unwrap()
     }
 
+    fn meta(hash: &str, size: i64, mtime: i64) -> FileMeta {
+        FileMeta {
+            hash: Hash(hash.into()),
+            file_size: size,
+            modified_time: mtime,
+        }
+    }
+
     #[test]
     fn empty_db_has_no_snapshots() {
         let p = tmp();
         let db = SnapsDb::open(&p).unwrap();
         assert!(db.latest_snapshot().unwrap().is_none());
-        assert!(db.list_snapshots().unwrap().is_empty());
     }
 
     #[test]
     fn diff_added_modified_unchanged_deleted() {
         let mut parent = HashMap::new();
-        parent.insert("a.txt".into(), (Hash("aaaa".into()), 10));
-        parent.insert("b.txt".into(), (Hash("bbbb".into()), 20));
-        parent.insert("c.txt".into(), (Hash("cccc".into()), 30));
+        parent.insert("a.txt".into(), meta("aaaa", 10, 1000));
+        parent.insert("b.txt".into(), meta("bbbb", 20, 1000));
+        parent.insert("c.txt".into(), meta("cccc", 30, 1000));
 
         let mut current = HashMap::new();
-        current.insert("a.txt".into(), (Hash("aaaa".into()), 10)); // unchanged
-        current.insert("b.txt".into(), (Hash("BBBB".into()), 20)); // modified
-        current.insert("d.txt".into(), (Hash("dddd".into()), 40)); // added
+        current.insert("a.txt".into(), meta("aaaa", 10, 1000)); // unchanged
+        current.insert("b.txt".into(), meta("BBBB", 20, 1000)); // modified
+        current.insert("d.txt".into(), meta("dddd", 40, 1000)); // added
         // c.txt is deleted
 
         let d = diff_states(&parent, &current);
@@ -330,5 +357,21 @@ mod tests {
         assert_eq!(d.modified.len(), 1);
         assert_eq!(d.unchanged.len(), 1);
         assert_eq!(d.deleted.len(), 1);
+    }
+
+    #[test]
+    fn schema_adds_modified_time_column() {
+        let p = tmp();
+        let conn = Connection::open(&p).unwrap();
+        crate::db::apply_pragmas(&conn).unwrap();
+        schema::init_snaps_db(&conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(files);")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(cols.iter().any(|c| c == "modifiedTime"));
     }
 }

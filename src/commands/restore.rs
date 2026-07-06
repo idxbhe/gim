@@ -1,19 +1,16 @@
-//! `g restore` — restore the game directory to match a specific snapshot.
+//! `gim restore` — restore the game directory to match a snapshot.
 //!
-//! Per spec:
-//! - Without `--full`: hashes current game directory to determine minimal
-//!   set of changes.
-//! - With `--full`: skips current-state hashing, overwrites all files from
-//!   the target snapshot.
-//!
-//! Pipeline:
-//! 1. VALIDATE
-//! 2. BUILD TARGET STATE (query files table for target snapshot)
-//! 3. SCAN & HASH CURRENT STATE (skipped if `--full`)
-//! 4. DIFF (target vs current — O(n+m))
-//! 5. PREVIEW (if `--dry-run`)
-//! 6. EXECUTE (parallel copy + delete)
-//! 7. REPORT
+//! Three modes:
+//! - **Default (smart)**: walk + stat the game directory, hash only
+//!   files whose size or mtime differs from the target snapshot. Copy
+//!   differing files from CAS, delete files not in target, set the
+//!   mtime of restored files to the snapshot's recorded mtime (so the
+//!   next `gim status` / `gim snap` is fast).
+//! - **`--full`**: skip walking entirely, overwrite ALL target files
+//!   from CAS, delete ALL non-target files. Slower but guarantees
+//!   correctness when the on-disk state is suspected corrupted.
+//! - `--full-hash` is intentionally NOT supported on `restore` because
+//!   `--full` already covers the "I don't trust the disk state" case.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{GamesDb, SnapsDb};
@@ -25,11 +22,12 @@ use crate::output::Colorizer;
 use crate::output::format_size;
 use crate::storage::Cas;
 use crate::walker::{walk_and_hash, WalkOptions};
+use filetime::FileTime;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn run(
     colorizer: &Colorizer,
@@ -64,55 +62,72 @@ pub fn run(
     let _lock = locking::acquire_game_lock(&alias, &snaps_db_path)?;
 
     // ── 2. BUILD TARGET STATE ───────────────────────────────────────
-    let target_map: HashMap<String, (Hash, i64)> =
-        snaps_db.files_for_snapshot(&snapshot_id)?;
+    let target_map = snaps_db.files_for_snapshot(&snapshot_id)?;
 
-    // ── 3. SCAN & HASH CURRENT STATE (skipped if --full) ────────────
-    // In --full mode we still walk the directory to learn which files
-    // exist on disk (so we can delete the ones not in target_map), but
-    // we skip hashing since we'll overwrite everything anyway.
-    let current_map: HashMap<String, (Hash, i64)> = if full {
-        let ignore_set = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
-        let paths_on_disk = crate::walker::walk_only(&game.game_dir, &ignore_set)?;
-        // Use a sentinel hash so that every file in current_map is
-        // treated as "differs from target" by the diff logic — but
-        // we filter `to_copy` separately below so this only affects
-        // `to_delete` (files in current but not in target).
-        paths_on_disk
-            .into_iter()
-            .map(|p| (p, (Hash("__sentinel_full__".into()), 0)))
-            .collect()
+    // ── 3. SCAN CURRENT STATE (smart) OR SKIP (--full) ──────────────
+    let current_map: HashMap<String, crate::db::FileMeta> = if full {
+        // Skip walking entirely; treat current_map as empty so the diff
+        // will copy ALL target files and delete ALL non-target files.
+        HashMap::new()
     } else {
         let ignore_set = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
         let walk_opts = WalkOptions {
             threads: threads.unwrap_or(0),
+            full_hash: false,
             ..WalkOptions::default()
         };
-        let (hashed, _locked) = walk_and_hash(&game.game_dir, &ignore_set, &walk_opts)?;
+        // Use the target snapshot as the reference for the mtime+size
+        // pre-filter: if a file on disk has matching size+mtime vs the
+        // target snapshot, we don't need to hash it (we'll trust that
+        // it matches the target).
+        let (hashed, _locked) = walk_and_hash(
+            &game.game_dir,
+            &ignore_set,
+            Some(&target_map),
+            &walk_opts,
+        )?;
         let mut m = HashMap::with_capacity(hashed.len());
         for f in hashed {
-            m.insert(f.file_path, (f.hash, f.file_size));
+            m.insert(
+                f.file_path,
+                crate::db::FileMeta {
+                    hash: f.hash,
+                    file_size: f.file_size,
+                    modified_time: f.modified_time,
+                },
+            );
         }
         m
     };
 
     // ── 4. DIFF (target vs current) ─────────────────────────────────
-    // For restore: we want to_copy (in target but missing or different
-    // in current) and to_delete (in current but not in target).
-    let mut to_copy: Vec<(String, Hash, i64)> = Vec::new();
+    let mut to_copy: Vec<(String, Hash, i64, i64)> = Vec::new(); // (path, hash, size, mtime_to_set)
     let mut to_delete: Vec<String> = Vec::new();
     if full {
-        // In --full mode, copy ALL target files unconditionally (we
-        // cannot trust the current on-disk state).
-        for (path, (hash, size)) in &target_map {
-            to_copy.push((path.clone(), hash.clone(), *size));
+        for (path, meta) in &target_map {
+            to_copy.push((
+                path.clone(),
+                meta.hash.clone(),
+                meta.file_size,
+                meta.modified_time,
+            ));
         }
     } else {
-        for (path, (hash, size)) in &target_map {
+        for (path, meta) in &target_map {
             match current_map.get(path) {
-                None => to_copy.push((path.clone(), hash.clone(), *size)),
-                Some((ch, _)) if ch != hash => {
-                    to_copy.push((path.clone(), hash.clone(), *size))
+                None => to_copy.push((
+                    path.clone(),
+                    meta.hash.clone(),
+                    meta.file_size,
+                    meta.modified_time,
+                )),
+                Some(cm) if cm.hash != meta.hash => {
+                    to_copy.push((
+                        path.clone(),
+                        meta.hash.clone(),
+                        meta.file_size,
+                        meta.modified_time,
+                    ));
                 }
                 _ => {} // unchanged
             }
@@ -131,9 +146,12 @@ pub fn run(
             colorizer.green(&alias),
             colorizer.bold(&snapshot_id)
         );
+        if full {
+            println!("  (--full mode: all files will be overwritten)");
+        }
         println!();
         println!("  to copy ({}):", to_copy.len());
-        for (p, _, s) in &to_copy {
+        for (p, _, s, _) in &to_copy {
             println!("    + {} ({})", colorizer.green(p), format_size(*s));
         }
         println!("  to delete ({}):", to_delete.len());
@@ -147,7 +165,6 @@ pub fn run(
     let cas = Cas::new(paths.objects_dir(&alias));
     let game_dir = game.game_dir.clone();
 
-    // Copy in parallel
     let pool = if let Some(n) = threads {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -170,7 +187,6 @@ pub fn run(
         }
     }
 
-    // Delete (serial — filesystem operations are usually fast for delete)
     for path in &to_delete {
         let abs = crate::path_utils::denormalize(&game_dir, path);
         if abs.exists() {
@@ -180,7 +196,6 @@ pub fn run(
         }
     }
 
-    // Clean up empty directories left by deleted files
     cleanup_empty_dirs(&game_dir, &to_delete);
 
     // ── 7. REPORT ───────────────────────────────────────────────────
@@ -206,19 +221,17 @@ pub fn run(
 fn copy_all(
     cas: &Cas,
     game_dir: &Path,
-    to_copy: &[(String, Hash, i64)],
+    to_copy: &[(String, Hash, i64, i64)],
 ) -> Vec<Result<(), String>> {
     to_copy
         .par_iter()
-        .map(|(path, hash, _size)| {
+        .map(|(path, hash, _size, mtime)| {
             let abs = crate::path_utils::denormalize(game_dir, path);
-            // Ensure parent directories exist
             if let Some(parent) = abs.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
                     return Err(format!("mkdir {path}: {e}"));
                 }
             }
-            // Copy from CAS to game dir
             let mut src = match cas.open(hash) {
                 Ok(f) => f,
                 Err(e) => return Err(format!("open object {hash}: {e}")),
@@ -239,16 +252,26 @@ fn copy_all(
                 }
             }
             let _ = dst.sync_all();
+            drop(dst);
+
+            // Set mtime to the snapshot's recorded mtime so subsequent
+            // `gim status` / `gim snap` can use the mtime+size fast
+            // pre-filter to skip re-hashing this file.
+            if *mtime > 0 {
+                let ft = FileTime::from_unix_time(*mtime, 0);
+                if let Err(e) = filetime::set_file_mtime(&abs, ft) {
+                    log::debug!("could not set mtime on {path}: {e}");
+                }
+            }
             Ok(())
         })
         .collect()
 }
 
-/// Remove empty directories left behind by file deletions. Walks up
-/// from each deleted file's parent until it hits a non-empty directory
-/// or the game root.
+/// Remove empty directories left behind by file deletions.
 fn cleanup_empty_dirs(game_dir: &Path, deleted_paths: &[String]) {
-    let mut checked: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut checked: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for p in deleted_paths {
         let abs = crate::path_utils::denormalize(game_dir, p);
         let mut cur = abs.parent().map(|x| x.to_path_buf());
@@ -257,7 +280,6 @@ fn cleanup_empty_dirs(game_dir: &Path, deleted_paths: &[String]) {
                 break;
             }
             checked.insert(dir.clone());
-            // Try to remove; if it's non-empty, the OS will error and we stop.
             if fs::remove_dir(&dir).is_err() {
                 break;
             }

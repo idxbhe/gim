@@ -1,4 +1,4 @@
-//! Error types for `g`.
+//! Error types for `gim`.
 //!
 //! All public APIs return `Result<T, GError>` (or `anyhow::Result` at the
 //! binary boundary). Internal modules use the strongly-typed [`GError`]
@@ -36,13 +36,13 @@ pub enum GError {
     #[error("invalid snapshot id \"{0}\": must match ^[A-Za-z0-9._-]+$ and not start with a dot")]
     InvalidSnapshotId(String),
 
-    #[error("no snapshots exist for game \"{0}\" — run `g snap {0}` first")]
+    #[error("no snapshots exist for game \"{0}\" — run `gim snap {0}` first")]
     NoSnapshots(String),
 
     #[error("\"{0}\" is locked by another operation (if this is a mistake, delete the lockfile at {1})")]
     Locked(String, PathBuf),
 
-    #[error("database corruption detected in {0} — run `g repair` to attempt recovery")]
+    #[error("database corruption detected in {0} — run `gim repair` to attempt recovery")]
     DbCorrupt(PathBuf),
 
     #[error("sqlite error: {0}")]
@@ -68,6 +68,9 @@ pub enum GError {
 
     #[error("ignore-pattern error: {0}")]
     Ignore(#[from] ignore::Error),
+
+    #[error("filetime error: {0}")]
+    FileTime(String),
 
     #[error("operation cancelled")]
     Cancelled,
@@ -102,6 +105,7 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::Hashing(_)
         | GError::Json(_)
         | GError::Ignore(_)
+        | GError::FileTime(_)
         | GError::Other(_)
         | GError::Cancelled => 1,
     }

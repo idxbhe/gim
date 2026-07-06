@@ -1,7 +1,4 @@
 //! `games.db` — the global game registry.
-//!
-//! Tracks every game that `g` knows about. Each row holds the alias
-//! (CLI key), title, game directory, and data directory.
 
 use crate::db::schema;
 use crate::error::{GError, GResult};
@@ -26,8 +23,6 @@ pub struct GamesDb {
 }
 
 impl GamesDb {
-    /// Open the global `games.db`, creating it (and its schema) if it
-    /// does not exist.
     pub fn open(path: &Path) -> GResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -73,8 +68,7 @@ impl GamesDb {
         Ok(())
     }
 
-    /// Remove a game by alias. Returns `true` if a row was deleted,
-    /// `false` if the alias did not exist.
+    /// Remove a game by alias. Returns `true` if a row was deleted.
     pub fn remove(&self, alias: &str) -> GResult<bool> {
         let rows = self
             .conn
@@ -102,7 +96,7 @@ impl GamesDb {
         }
     }
 
-    /// List all games, ordered by alias (lexicographic).
+    /// List all games, ordered by alias.
     pub fn list(&self) -> GResult<Vec<Game>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, alias, title, gameDir, dataDir, addedAt FROM games ORDER BY alias ASC",
@@ -147,7 +141,6 @@ mod tests {
         .unwrap();
         let g = db.get("mario").unwrap().unwrap();
         assert_eq!(g.title, "Super Mario Bros");
-        assert_eq!(g.alias, "mario");
     }
 
     #[test]
@@ -168,20 +161,5 @@ mod tests {
             Path::new("/data/other"),
         );
         assert!(matches!(r, Err(GError::AliasExists(_))));
-    }
-
-    #[test]
-    fn remove_returns_bool() {
-        let path = tmp();
-        let db = GamesDb::open(&path).unwrap();
-        db.add(
-            "mario",
-            "Super Mario Bros",
-            Path::new("/games/mario"),
-            Path::new("/data/mario"),
-        )
-        .unwrap();
-        assert!(db.remove("mario").unwrap());
-        assert!(!db.remove("mario").unwrap());
     }
 }

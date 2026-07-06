@@ -1,10 +1,4 @@
-//! `g ignore` — manage ignore patterns for a game.
-//!
-//! Per spec:
-//! - `--add [pattern]` — append a pattern to per-game `.gignore`
-//! - `--remove [pattern]` — remove a pattern from per-game `.gignore`
-//! - `--list` — list all active ignore patterns (merged from all sources)
-//! - `--edit` — open per-game `.gignore` in `$EDITOR`
+//! `gim ignore` — manage ignore patterns for a game.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::GamesDb;
@@ -36,7 +30,6 @@ pub fn run(
     let per_game_gignore = paths.per_game_gignore(&alias);
 
     if let Some(p) = add {
-        // Append a new line to per-game .gignore (creates if missing).
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -61,7 +54,7 @@ pub fn run(
         return Ok(());
     }
 
-    if list {
+    if list || (!edit && add.is_none() && remove.is_none()) {
         let set: IgnoreSet = build_for_game(&paths, &alias, &game.game_dir)?;
         println!("{alias} ignore patterns (global + per-game + in-game):");
         println!();
@@ -76,7 +69,6 @@ pub fn run(
     }
 
     if edit {
-        // Ensure file exists
         if !per_game_gignore.exists() {
             fs::write(&per_game_gignore, b"")?;
         }
@@ -96,19 +88,6 @@ pub fn run(
                 "editor \"{editor}\" exited with status {status}"
             )));
         }
-        return Ok(());
-    }
-
-    // No flag given — default to --list for convenience.
-    let set: IgnoreSet = build_for_game(&paths, &alias, &game.game_dir)?;
-    println!("{alias} ignore patterns (global + per-game + in-game):");
-    println!();
-    for src in &set.sources {
-        println!("  {}", src.label);
-        for p in &src.patterns {
-            println!("    {p}");
-        }
-        println!();
     }
     Ok(())
 }

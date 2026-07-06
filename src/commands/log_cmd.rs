@@ -1,4 +1,4 @@
-//! `g log` — show snapshot history for a game.
+//! `gim log` — show snapshot history for a game.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{GamesDb, SnapsDb};
@@ -80,7 +80,6 @@ pub fn run(
         return Ok(());
     }
 
-    // Default (tree-style)
     println!("{} snapshot history:", colorizer.bold(&alias));
     println!();
     for (i, s) in snapshots.iter().enumerate() {

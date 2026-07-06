@@ -1,4 +1,4 @@
-//! `g diff` — compare two snapshots and show file differences.
+//! `gim diff` — compare two snapshots and show file differences.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{GamesDb, SnapsDb};
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 #[derive(Serialize)]
 struct DiffEntry {
-    kind: String, // "added" | "deleted" | "modified"
+    kind: String,
     path: String,
     size: Option<i64>,
 }
@@ -56,15 +56,14 @@ pub fn run(
     let map_a: HashMap<String, (String, i64)> = snaps_db
         .files_for_snapshot(&snapshot_a)?
         .into_iter()
-        .map(|(p, (h, s))| (p, (h.0, s)))
+        .map(|(p, m)| (p, (m.hash.0, m.file_size)))
         .collect();
     let map_b: HashMap<String, (String, i64)> = snaps_db
         .files_for_snapshot(&snapshot_b)?
         .into_iter()
-        .map(|(p, (h, s))| (p, (h.0, s)))
+        .map(|(p, m)| (p, (m.hash.0, m.file_size)))
         .collect();
 
-    // Compute diff A → B
     let mut added: Vec<(String, i64)> = Vec::new();
     let mut modified: Vec<(String, i64, i64)> = Vec::new();
     let mut deleted: Vec<(String, i64)> = Vec::new();
@@ -77,7 +76,6 @@ pub fn run(
                 net_size += size_b;
             }
             Some((hash_a, _)) if hash_a != hash_b => {
-                // modified — net size is the difference
                 let old_size = map_a.get(path).map(|(_, s)| *s).unwrap_or(0);
                 modified.push((path.clone(), old_size, *size_b));
                 net_size += *size_b - old_size;
@@ -119,7 +117,6 @@ pub fn run(
         return Ok(());
     }
 
-    // Default: line-per-change
     println!("diff {} → {}", snapshot_a, snapshot_b);
     println!();
     for (p, s) in &added {

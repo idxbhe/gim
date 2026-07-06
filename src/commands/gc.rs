@@ -1,4 +1,4 @@
-//! `g gc` — garbage-collect unreferenced objects.
+//! `gim gc` — garbage-collect unreferenced objects.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{GamesDb, SnapsDb};
@@ -22,20 +22,12 @@ pub fn run(colorizer: &Colorizer, alias: String, dry_run: bool) -> GResult<()> {
     let snaps_db_path = paths.snaps_db(&alias);
     let snaps_db = SnapsDb::open(&snaps_db_path)?;
 
-    // 1. Referenced hashes (across all snapshots)
     let referenced = snaps_db.referenced_hashes()?;
-
-    // 2. Stored hashes on disk
     let cas = Cas::new(paths.objects_dir(&alias));
     let stored = cas.list_all_hashes()?;
-
-    // 3. Orphaned = stored - referenced
     let orphaned: Vec<&String> = stored.iter().filter(|h| !referenced.contains(*h)).collect();
-
-    // 4. Also collect stray .tmp files
     let tmp_files = cas.list_tmp_files()?;
 
-    // 5. Total size to free
     let mut freed: i64 = 0;
     for h in &orphaned {
         if let Ok(meta) = std::fs::metadata(crate::path_utils::object_path(
@@ -52,17 +44,13 @@ pub fn run(colorizer: &Colorizer, alias: String, dry_run: bool) -> GResult<()> {
     }
 
     if dry_run {
-        println!(
-            "dry run: would garbage collect {}",
-            colorizer.green(&alias)
-        );
+        println!("dry run: would garbage collect {}", colorizer.green(&alias));
         println!("  {} orphaned objects", orphaned.len());
         println!("  {} stray .tmp files", tmp_files.len());
         println!("  would free {}", format_size(freed));
         return Ok(());
     }
 
-    // Delete
     let mut removed = 0usize;
     for h in &orphaned {
         if cas.delete(h.as_str())? {

@@ -1,13 +1,4 @@
-//! `g list` — list all tracked games.
-//!
-//! Per spec, default output:
-//! ```text
-//! mario:    Super Mario Bros    `C:\Games\Super Mario Bros`
-//! skyrim:   The Elder Scrolls V `D:\Games\Steam\skyrim`
-//! ```
-//!
-//! With `--details`, show per-game block with title, gameDir, dataDir,
-//! addedAt, and snap count. With `--json`, emit JSON.
+//! `gim list` — list all tracked games.
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{GamesDb, SnapsDb};
@@ -58,7 +49,7 @@ pub fn run(colorizer: &Colorizer, details: bool, json: bool) -> GResult<()> {
     }
 
     if games.is_empty() {
-        println!("no games tracked — use `g add <alias> <game_dir>` to add one");
+        println!("no games tracked — use `gim add <alias> <game_dir>` to add one");
         return Ok(());
     }
 
@@ -68,9 +59,7 @@ pub fn run(colorizer: &Colorizer, details: bool, json: bool) -> GResult<()> {
             println!("  title:    {}", g.title);
             println!("  gameDir:  {}", g.game_dir.display());
             println!("  dataDir:  {}", g.data_dir.display());
-            // Format addedAt (Unix seconds) as YYYY-MM-DD HH:MM:SS UTC
             println!("  addedAt:  {}", format_timestamp(g.added_at * 1000));
-            // Snapshot count
             let snaps_db_path = g.data_dir.join("snaps.db");
             let count = match SnapsDb::open(&snaps_db_path) {
                 Ok(db) => db.list_snapshots().map(|v| v.len()).unwrap_or(0),
@@ -82,8 +71,6 @@ pub fn run(colorizer: &Colorizer, details: bool, json: bool) -> GResult<()> {
         return Ok(());
     }
 
-    // Default: aligned columns
-    // Compute max alias width for alignment
     let max_alias = games.iter().map(|g| g.alias.len()).max().unwrap_or(0);
     let max_title = games.iter().map(|g| g.title.len()).max().unwrap_or(0);
     for g in &games {

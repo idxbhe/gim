@@ -1,8 +1,4 @@
 //! Command implementations.
-//!
-//! Each command lives in its own module so that the codebase scales
-//! cleanly: adding a new command only touches `commands/mod.rs` (one
-//! new `pub mod` line + one new match arm in `dispatch`).
 
 pub mod add;
 pub mod diff;
@@ -20,10 +16,6 @@ use crate::error::{exit_code, GError, GResult};
 use crate::output;
 
 /// Dispatch a parsed CLI command to its implementation.
-///
-/// All commands share the same error-handling path: any `Err` returned
-/// is converted to a user-facing message and a non-zero exit code by
-/// the caller in `main.rs`.
 pub fn run(cmd: Command) -> GResult<()> {
     let colorizer = output::default_colorizer();
     match cmd {
@@ -34,17 +26,15 @@ pub fn run(cmd: Command) -> GResult<()> {
             data_dir,
         } => add::run(&colorizer, alias, game_dir, title, data_dir),
         Command::Remove { alias, confirm } => remove::run(&colorizer, alias, confirm),
-        Command::List {
-            details,
-            json,
-        } => list::run(&colorizer, details, json),
+        Command::List { details, json } => list::run(&colorizer, details, json),
         Command::Snap {
             alias,
             id,
             msg,
             threads,
             dry_run,
-        } => snap::run(&colorizer, alias, id, msg, threads, dry_run),
+            full_hash,
+        } => snap::run(&colorizer, alias, id, msg, threads, dry_run, full_hash),
         Command::Restore {
             alias,
             snapshot_id,
@@ -56,7 +46,8 @@ pub fn run(cmd: Command) -> GResult<()> {
             alias,
             threads,
             json,
-        } => status::run(&colorizer, alias, threads, json),
+            full_hash,
+        } => status::run(&colorizer, alias, threads, json, full_hash),
         Command::Log {
             alias,
             oneline,
