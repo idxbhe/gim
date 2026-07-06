@@ -1,4 +1,4 @@
-# `g` — Game Files Version Control Tool
+# `gim` — Game Files Version Control Tool
 
 A CLI tool for versioning game files. Similar to `git`, but purpose-built for
 game directories. Uses **SQLite** for metadata and **XXH3-128** for fast
@@ -17,35 +17,35 @@ prevent concurrent mutation.
 # Build
 cargo build --release
 
-# The binary is at target/release/g. Copy it somewhere on your PATH.
+# The binary is at target/release/gim. Copy it somewhere on your PATH.
 
 # Add a game (creates data/mario/ structure)
-g add mario "C:/Games/Super Mario Bros"
+gim add mario "C:/Games/Super Mario Bros"
 
 # Take the first snapshot
-g snap mario -m "Initial snapshot"
+gim snap mario -m "Initial snapshot"
 
 # Make some changes to the game directory, then snapshot again
-g snap mario -m "Installed texture pack"
+gim snap mario -m "Installed texture pack"
 
 # See what changed since the last snapshot
-g status mario
+gim status mario
 
 # Browse history
-g log mario
+gim log mario
 
 # Compare two snapshots
-g diff mario original 20240115-143000
+gim diff mario original 20240115-143000
 
 # Restore the game directory to a previous state
-g restore mario original --full
+gim restore mario original --full
 
 # Garbage-collect unreferenced objects
-g gc mario --dry-run
-g gc mario
+gim gc mario --dry-run
+gim gc mario
 
 # Remove a game and all its data
-g remove mario --confirm
+gim remove mario --confirm
 ```
 
 ---
@@ -53,7 +53,7 @@ g remove mario --confirm
 ## Binary directory layout
 
 ```
-g.exe
+gim.exe
 data/
   games.db                                  global game registry
   gignore                                   global ignore patterns (optional)
@@ -64,7 +64,7 @@ data/
     .gignore                                per-game ignore patterns (optional)
 ```
 
-The data directory defaults to `[g binary dir]/data/` and can be overridden
+The data directory defaults to `[gim binary dir]/data/` and can be overridden
 with the `G_DATA_DIR` environment variable (useful for tests).
 
 ---
@@ -124,7 +124,7 @@ src/
   `pub mod` line + one new match arm in `dispatch`) plus the new file.
 - **Pure where possible**: `diff_states()` and `normalize()` are pure
   functions with no side effects and full unit-test coverage.
-- **Transactional**: every `g snap` writes its `snaps` row, `files` rows,
+- **Transactional**: every `gim snap` writes its `snaps` row, `files` rows,
   and `deleted_files` rows inside a single SQLite transaction. If anything
   fails, the transaction rolls back and any objects already copied to the
   CAS are deleted.
@@ -191,84 +191,84 @@ is the `ignore` crate, which is the same one `ripgrep` uses.
 Manage patterns with:
 
 ```bash
-g ignore mario --add "logs/"
-g ignore mario --remove "logs/"
-g ignore mario --list
-g ignore mario --edit   # opens data/mario/.gignore in $EDITOR
+gim ignore mario --add "logs/"
+gim ignore mario --remove "logs/"
+gim ignore mario --list
+gim ignore mario --edit   # opens data/mario/.gignore in $EDITOR
 ```
 
 ---
 
 ## Commands
 
-### `g add`
+### `gim add`
 ```
-g add [alias] [game directory]
+gim add [alias] [game directory]
     --title   [optional: display title]
     --dataDir [optional: data directory]
 ```
 
-### `g remove`
+### `gim remove`
 ```
-g remove [alias]
+gim remove [alias]
     --confirm  (required: prevents accidental deletion)
 ```
 
-### `g list`
+### `gim list`
 ```
-g list
+gim list
     --details    (optional: show all columns from games.db)
     --json       (optional: output as JSON)
 ```
 
-### `g snap`
+### `gim snap`
 ```
-g snap [alias]
+gim snap [alias]
     --id      [optional: custom snapshot ID]
     -m/--msg  [optional: snapshot message]
     -t/--threads [optional: thread count for hashing & copying]
     --dry-run [optional: preview changes without writing]
 ```
 
-### `g restore`
+### `gim restore`
 ```
-g restore [alias] [target snapshot ID]
+gim restore [alias] [target snapshot ID]
     --full     [optional: force full copy, skip current-state hashing]
     -t/--threads [optional: thread count]
     --dry-run  [optional: preview changes without modifying files]
 ```
 
-### `g status`
+### `gim status`
 ```
-g status [alias]
+gim status [alias]
     -t/--threads [optional: thread count]
     --json       [optional: output as JSON]
 ```
 
-### `g log`
+### `gim log`
 ```
-g log [alias]
+gim log [alias]
     --oneline   [optional: one snapshot per line]
     --json      [optional: output as JSON]
     -n [number] [optional: limit number of entries, default: all]
 ```
 
-### `g diff`
+### `gim diff`
 ```
-g diff [alias] [snapshot ID A] [snapshot ID B]
+gim diff [alias] [snapshot ID A] [snapshot ID B]
     --stat      [optional: show summary statistics only]
     --json      [optional: output as JSON]
 ```
 
-### `g gc`
+### `gim gc`
 ```
-g gc [alias]
+gim gc [alias]
     --dry-run  [optional: preview without deleting]
 ```
 
-### `g ignore`
+### `gim ignore`
 ```
-g ignore [alias]
+gim ignore [alias]
     --add [pattern]     [add a pattern to per-game .gignore]
     --remove [pattern]  [remove a pattern from per-game .gignore]
     --list              [list all active ignore patterns for this game]
@@ -294,7 +294,7 @@ g ignore [alias]
   object visible.
 - **Integrity check**: every `snaps.db` connection runs
   `PRAGMA integrity_check` on open. Corruption is reported with a clear
-  error pointing the user at `g repair`.
+  error pointing the user at `gim repair`.
 
 ---
 
@@ -302,7 +302,7 @@ g ignore [alias]
 
 | Variable      | Effect                                                              |
 |---------------|---------------------------------------------------------------------|
-| `G_DATA_DIR`  | Override the data directory (default: `[g binary dir]/data`).      |
+| `G_DATA_DIR`  | Override the data directory (default: `[gim binary dir]/data`).      |
 | `NO_COLOR`    | Disable colored output (also auto-disabled when stdout isn't a TTY).|
 | `EDITOR`      | Editor used by `g ignore --edit` (default: `vi` / `notepad`).      |
 
