@@ -5,8 +5,8 @@
 //! message + exit code.
 
 use clap::Parser;
-use g::cli::Cli;
-use g::commands;
+use gim::cli::Cli;
+use gim::commands;
 
 fn main() {
     // Initialize logging (controlled by -v / -vv / -vvv flags).
