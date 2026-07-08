@@ -1,4 +1,4 @@
-//! Output formatting — terminal colors, size formatting, JSON helpers.
+//! Output formatting.
 
 pub mod color;
 pub mod fmt;
@@ -6,8 +6,6 @@ pub mod fmt;
 pub use color::Colorizer;
 pub use fmt::{format_size, format_size_compact, format_timestamp};
 
-/// Default colorizer used by the CLI. Respects `NO_COLOR` env var
-/// and whether stdout is a TTY.
 pub fn default_colorizer() -> Colorizer {
     let enable = std::env::var_os("NO_COLOR").is_none() && atty_stdout();
     Colorizer::new(enable)

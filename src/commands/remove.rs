@@ -1,4 +1,4 @@
-//! `gim remove` — remove a game and all its associated data.
+//! `gim remove`
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::GamesDb;
@@ -11,26 +11,13 @@ pub fn run(_colorizer: &Colorizer, alias: String, confirm: bool) -> GResult<()> 
         println!("use `gim remove {alias} --confirm` to proceed");
         return Ok(());
     }
-
     let mut paths = Paths::from_env()?;
-    if let Some(override_dir) = env_data_dir_override() {
-        paths = paths.with_data_dir(override_dir);
-    }
+    if let Some(o) = env_data_dir_override() { paths = paths.with_data_dir(o); }
     paths.ensure_data_dir()?;
-
     let games_db = GamesDb::open(&paths.games_db)?;
-    let game = games_db
-        .get(&alias)?
-        .ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
-
-    let removed = games_db.remove(&alias)?;
-    debug_assert!(removed);
-
-    let data_dir = &game.data_dir;
-    if data_dir.exists() {
-        std::fs::remove_dir_all(data_dir)?;
-    }
-
+    let game = games_db.get(&alias)?.ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
+    games_db.remove(&alias)?;
+    if game.data_dir.exists() { std::fs::remove_dir_all(&game.data_dir)?; }
     println!("removed {alias} and all associated data");
     Ok(())
 }

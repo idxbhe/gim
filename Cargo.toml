@@ -1,12 +1,11 @@
 [package]
 name = "gim"
-version = "0.2.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.85"
 authors = ["gim contributors"]
 license = "MIT"
 description = "Game files version control tool — git for game directories"
-repository = "https://example.com/gim"
 readme = "README.md"
 keywords = ["cli", "version-control", "games", "snapshot", "backup"]
 categories = ["command-line-utilities"]
@@ -26,52 +25,24 @@ panic = "abort"
 opt-level = 1
 
 [dependencies]
-# CLI argument parsing
 clap = { version = "4.5.20", features = ["derive", "color", "wrap_help"] }
-
-# Database (SQLite, bundled so no system deps required)
 rusqlite = { version = "0.32.1", features = ["bundled", "blob", "chrono"] }
-
-# Hashing — XXH3 128-bit, extremely fast
 xxhash-rust = { version = "0.8.12", features = ["xxh3"] }
-
-# Directory walking & ignore-pattern matching (gitignore-compatible)
 walkdir = "2.5.0"
 ignore = "0.4.23"
 globset = "0.4.15"
-
-# Parallelism
 rayon = "1.10.0"
 crossbeam-channel = "0.5.13"
-
-# Error handling
 anyhow = "1.0.91"
 thiserror = "1.0.65"
-
-# Serialization (for --json output)
 serde = { version = "1.0.213", features = ["derive"] }
 serde_json = "1.0.132"
-
-# Time
 chrono = { version = "0.4.38", features = ["serde", "clock"] }
-
-# File mtime manipulation (set mtime on restored files so subsequent
-# status/snap can use the mtime+size fast pre-filter)
 filetime = "0.2.25"
-
-# File locking (advisory)
 fs2 = "0.4.3"
-
-# Terminal colors
 colored = "2.1.0"
-
-# Platform directories
 dirs = "5.0.1"
-
-# Progress reporting
 indicatif = "0.17.8"
-
-# Logging
 log = "0.4.22"
 env_logger = "0.11.5"
 

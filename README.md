@@ -2,67 +2,67 @@
 
 A CLI tool for versioning game files. Similar to `git`, but purpose-built for
 game directories. Uses **SQLite** for metadata, **XXH3-128** for fast
-non-cryptographic file hashing, and a **mtime+size fast pre-filter** so that
-`gim status` / `gim snap` on an unchanged game directory completes in
-milliseconds instead of minutes.
-
-Built in Rust with a modular, production-ready architecture: per-command
-modules, a transactional storage layer, content-addressable object store with
-automatic deduplication, parallel hashing via Rayon, and advisory locking to
-prevent concurrent mutation.
+non-cryptographic file hashing, a **mtime+size fast pre-filter** for instant
+status checks, **branches** for parallel timelines, and safe **snapshot
+deletion** with automatic re-parenting.
 
 ---
 
-## What's new in v0.2
+## What's new in v0.3
 
-- **Renamed binary & project** from `g` → `gim` (env var `G_DATA_DIR` → `GIM_DATA_DIR`).
-- **mtime + size fast pre-filter** on `gim status`, `gim snap`, `gim restore`:
-  files whose `size` and `mtime` match the reference snapshot are not re-hashed.
-  On an idle 30 GB game directory with 10,000+ files, `gim status` drops from
-  "several minutes" to "milliseconds" because zero files are hashed.
+- **Snapshot deletion** (`gim delete`): safely remove a snapshot from the
+  chain. Children are automatically re-parented to the deleted snapshot's
+  parent. Refuses to delete snapshots referenced by branches. Deleting the
+  root ("original") requires `--force`.
+- **Branches** (`gim branch`): create, delete, switch, and list named
+  pointers to snapshots. `gim snap` advances the current branch. Switching
+  branches restores the target snapshot to disk (with uncommitted-change
+  detection). The "main" branch is auto-created and protected.
+- **Snapshot ID collision fix**: two snaps within the same second now get
+  `-2`, `-3`, ... suffixes instead of failing.
+
+## What was new in v0.2
+
+- **Renamed** binary & project from `g` → `gim` (env var `GIM_DATA_DIR`).
+- **mtime + size fast pre-filter**: files whose size and mtime match the
+  reference snapshot are not re-hashed. `gim status` on an unchanged 30 GB
+  game directory completes in milliseconds.
 - **`--full-hash` flag** on `gim snap` and `gim status` to bypass the
-  pre-filter when the user suspects stored mtimes are misleading.
-- **`modifiedTime` column** added to the `files` table. Old `snaps.db`
-  databases are auto-migrated on first open.
-- **`gim restore` now sets mtime** on restored files to match the snapshot's
-  recorded mtime, so the post-restore `gim status` is fast.
+  pre-filter.
+- **`modifiedTime` column** in the `files` table (auto-migrated from v0.1).
+- **`gim restore` sets mtime** on restored files for fast post-restore status.
 
 ---
 
 ## Quick start
 
 ```bash
-# Build
 cargo build --release
+# Binary: target/release/gim
 
-# The binary is at target/release/gim. Copy it somewhere on your PATH.
-
-# Add a game
-gim add mario "C:/Games/Super Mario Bros"
-
-# Take the first snapshot
+gim add mario "/path/to/game"
 gim snap mario -m "Initial snapshot"
-
-# Make some changes to the game directory, then snapshot again
-gim snap mario -m "Installed texture pack"
-
-# See what changed since the last snapshot (instant if nothing changed)
-gim status mario
-
-# Browse history
+gim snap mario -m "After mod install"
+gim status mario              # instant if nothing changed
 gim log mario
 
-# Compare two snapshots
-gim diff mario original 20240115-143000
+# Branches
+gim branch mario --create experimental
+gim branch mario --switch experimental
+# ...make changes, snap on experimental...
+gim branch mario --switch main --force  # discard experimental changes
 
-# Restore the game directory to a previous state
+# Delete a snapshot
+gim delete mario <snapshot-id> --dry-run
+gim delete mario <snapshot-id>
+
+# Restore
 gim restore mario original --full
 
-# Garbage-collect unreferenced objects
-gim gc mario --dry-run
+# Garbage-collect orphaned objects
 gim gc mario
 
-# Remove a game and all its data
+# Remove a game entirely
 gim remove mario --confirm
 ```
 
@@ -73,43 +73,71 @@ gim remove mario --confirm
 `gim status`, `gim snap`, and `gim restore` (without `--full`) use a two-pass
 pipeline:
 
-1. **Walk + stat** (single-threaded): walkdir traverses the game directory,
-   applies ignore patterns, and collects `(path, size, mtime)` for each file.
-   No file content is read — only `stat()`, which takes milliseconds even for
-   10,000+ files.
+1. **Walk + stat** (single-threaded): collect `(path, size, mtime)` for each
+   file. No file content is read — only `stat()`.
 2. **Smart hash** (parallel via Rayon): for each file:
-   - File is NOT in the reference snapshot → hash (new file).
-   - File IS in reference, but `size` OR `mtime` differs → hash to verify.
-   - File IS in reference AND `size` AND `mtime` match → **skip hashing**,
-     reuse the reference hash.
+   - Not in reference snapshot → hash (new file).
+   - In reference, but size OR mtime differs → hash to verify.
+   - In reference AND size AND mtime match → **skip hashing**, reuse the
+     reference hash.
 
-**Result:** for an idle game directory, the hash pass does **zero** file
-reads. Only 5 changed files? Only 5 files are hashed, not 10,000.
+For an idle game directory, the hash pass does **zero** file reads. Use
+`--full-hash` to bypass the pre-filter when you suspect stored mtimes are
+misleading.
 
-### Why this is safe
+`gim restore` sets the mtime of restored files to the snapshot's recorded
+mtime, so the post-restore `gim status` is also fast.
 
-The pre-filter is a **heuristic**, not ground truth. Its correctness rests on:
-"if size and mtime are unchanged, the file content is unchanged." This holds
-for the overwhelming majority of game files because game engines always
-rewrite save/config files wholesale, which updates mtime.
+---
 
-The rare edge case (content changed but mtime preserved by `touch -d` or by
-an editor that explicitly preserves mtime) is documented. Users can defeat
-it with:
+## Branches
 
-```bash
-gim snap mario --full-hash      # force full hashing on snap
-gim status mario --full-hash    # force full hashing on status
+A branch is a named, movable pointer to a snapshot. Exactly one branch is
+"current" at any time. `gim snap` creates a new snapshot whose parent is the
+current branch's snapshot, then advances the current branch.
+
+```
+gim branch [alias]                           # list branches
+gim branch [alias] --create [name]           # create pointing to current branch's snapshot
+gim branch [alias] --create [name] --from [snapshot-id]
+gim branch [alias] --delete [name]           # refuse if current or "main"
+gim branch [alias] --switch [name]           # restore + update current branch
+gim branch [alias] --switch [name] --force   # discard uncommitted changes
 ```
 
-### `gim restore` cooperation
+**Edge cases handled:**
+- Creating a duplicate branch name → `BranchExists` error.
+- Deleting the current branch → refused; must switch first.
+- Deleting "main" → refused (protected).
+- Switching with uncommitted changes → refused unless `--force`.
+- Switching to the current branch → no-op.
+- `--from` pointing to a non-existent snapshot → `SnapshotNotFound`.
+- Legacy DB without branches → auto-migrated: "main" created pointing to
+  latest snapshot.
 
-When `gim restore` writes a file back to the game directory, the OS would
-normally set its mtime to "now" — which would cause the next `gim status`
-to think every restored file had changed. To prevent this, `gim restore`
-explicitly sets the mtime of each restored file to the snapshot's recorded
-mtime via `filetime::set_file_mtime`. This means the post-restore `gim status`
-is as fast as a no-op status check.
+---
+
+## Snapshot deletion
+
+```
+gim delete [alias] [snapshot-id]
+    --dry-run    # preview
+    --force      # required to delete the root ("original")
+```
+
+**Semantics:**
+- The snapshot's `files` and `deleted_files` rows are deleted.
+- Children (snapshots whose `parentSnapId` points to this one) are
+  **re-parented** to the deleted snapshot's parent (could be NULL).
+- Refuses if any branch points to the snapshot (must move/delete branch first).
+- Deleting "original" (root) requires `--force`; children become new roots.
+- Orphaned objects in `objects/` are NOT deleted here — run `gim gc` to
+  reclaim disk space.
+- Everything happens in a single SQLite transaction (atomic).
+
+**Why re-parenting is safe:** every snapshot stores its full file set (not
+deltas). The `parentSnapId` is only used for history traversal and `gim log`
+display — it doesn't affect `gim restore` correctness.
 
 ---
 
@@ -120,15 +148,33 @@ gim
 data/
   games.db                                  global game registry
   gignore                                   global ignore patterns (optional)
-  [game alias]/
-    snaps.db                                snapshot & file registry
+  [alias]/
+    snaps.db                                snapshot + file + branch + meta tables
     objects/                                content-addressable file store
-      ab/cdef0123456789abcdef...            file blob, stored as [hash_prefix]/[hash]
+      ab/cdef0123456789abcdef...            [hash_prefix]/[hash]
     .gignore                                per-game ignore patterns (optional)
 ```
 
-The data directory defaults to `[gim binary dir]/data/` and can be overridden
-with the `GIM_DATA_DIR` environment variable.
+Override the data directory with `GIM_DATA_DIR`.
+
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `gim add` | Register a game for tracking. |
+| `gim remove` | Remove a game and all its data (`--confirm` required). |
+| `gim list` | List tracked games (`--details`, `--json`). |
+| `gim snap` | Take a snapshot (`--full-hash`, `--dry-run`, `-m`, `-t`). |
+| `gim restore` | Restore to a snapshot (`--full`, `--dry-run`, `-t`). |
+| `gim status` | Show changes since last snapshot (`--full-hash`, `--json`). |
+| `gim log` | Show snapshot history (`--oneline`, `--json`, `-n`). |
+| `gim diff` | Compare two snapshots (`--stat`, `--json`). |
+| `gim delete` | Delete a snapshot (`--dry-run`, `--force`). |
+| `gim branch` | Manage branches (`--create`, `--delete`, `--switch`, `--from`, `--force`). |
+| `gim gc` | Garbage-collect orphaned objects (`--dry-run`). |
+| `gim ignore` | Manage ignore patterns (`--add`, `--remove`, `--list`, `--edit`). |
 
 ---
 
@@ -136,230 +182,89 @@ with the `GIM_DATA_DIR` environment variable.
 
 ```
 src/
-├── main.rs              Binary entry point: parse CLI, dispatch, exit code
-├── lib.rs               Library root: re-exports all modules
-├── cli.rs               clap derive definitions for every subcommand
-├── error.rs             GError enum + exit-code mapping
+├── main.rs              Entry point
+├── lib.rs               Library root
+├── cli.rs               clap derive definitions
+├── error.rs             GError enum + exit codes (includes branch/delete errors)
 ├── commands/            One module per subcommand
-│   ├── snap.rs          Core: walk+stat → smart hash → diff → store → report
-│   ├── restore.rs       Core: walk+stat → smart hash → copy/delete in parallel
-│   ├── status.rs        Uses smart walk for instant "no changes" result
-│   ├── diff.rs          Pure DB query (no walking)
-│   └── ...              add, remove, list, log, gc, ignore
-├── db/                  SQLite layer
+│   ├── snap.rs          Walk+stat → smart hash → diff → store → advance branch
+│   ├── restore.rs       Walk+stat → smart hash → copy/delete in parallel + set mtime
+│   ├── status.rs        Smart walk vs current branch's snapshot
+│   ├── delete.rs        Re-parent children + refuse if branch refs + atomic tx
+│   ├── branch.rs        Create/delete/switch/list + uncommitted-change detection
+│   ├── log_cmd.rs       History with branch markers
+│   └── ...              add, remove, list, diff, gc, ignore
+├── db/
 │   ├── games.rs         games.db CRUD
-│   ├── snaps.rs         snaps.db CRUD + diff_states() + FileMeta (with mtime)
-│   └── schema.rs        Idempotent DDL + auto-migration for modifiedTime
+│   ├── snaps.rs         snaps.db CRUD + branches + meta + diff_states + children_of
+│   └── schema.rs        DDL + auto-migration (modifiedTime, branches, meta)
 ├── storage/cas.rs       Content-addressable store (atomic writes, dedup)
-├── hashing/mod.rs       XXH3-128 streaming hash + retry-on-locked-file
-├── ignore_mod/mod.rs    gitignore-compatible pattern matching
-├── walker/mod.rs        Parallel walk + stat + smart-hash pipeline (Rayon)
+├── hashing/mod.rs       XXH3-128 streaming hash + retry
+├── ignore_mod/mod.rs    gitignore-compatible matching
+├── walker/mod.rs        Parallel walk + stat + smart-hash pipeline
 ├── path_utils/mod.rs    Path normalization
-├── locking/mod.rs       Advisory file locks (fs2)
-├── config/mod.rs        Path resolution + GIM_DATA_DIR override
-├── output/              Colorizer + size/timestamp formatting
-└── parallel/mod.rs      Re-exports Rayon
-```
-
-### Design principles
-
-- **Modular**: each command, storage primitive, and IO concern is in its own
-  module. Adding a new command only touches `commands/mod.rs` plus the new
-  file.
-- **Pure where possible**: `diff_states()` and `normalize()` are pure
-  functions with no side effects and full unit-test coverage.
-- **Transactional**: every `gim snap` writes its `snaps` row, `files` rows,
-  and `deleted_files` rows inside a single SQLite transaction. On failure the
-  transaction rolls back and any objects already copied to the CAS are
-  deleted.
-- **Streaming**: XXH3 hashing streams files through a 1 MiB buffer, so
-  multi-GB game archives are hashed without loading them into memory.
-- **Smart pre-filter**: the mtime+size heuristic skips hashing for files
-  that haven't changed. `--full-hash` is the escape hatch.
-- **Parallel**: the walk→hash pipeline uses Rayon. Worker count is
-  configurable with `--threads`; defaults to `num_cpus`.
-- **Resilient**: locked files (e.g. when a game is running) are retried 3
-  times with 500 ms delay, then skipped with a warning rather than failing
-  the whole snapshot.
-- **Atomic CAS writes**: every object is written to a `.tmp` sibling, fsync'd,
-  and atomically renamed. A crash never leaves a partially-written object.
-- **Auto-migration**: old `snaps.db` files (created by gim v0.1) are
-  automatically upgraded to include the `modifiedTime` column on first open.
-
----
-
-## Hashing
-
-- **Algorithm**: XXH3-128 (128-bit, non-cryptographic)
-- **Output**: 32-character lowercase hex string
-- **Why**: XXH3 runs at multi-GB/s on modern CPUs, ideal for large game files.
-  128-bit collision resistance is more than sufficient for file-integrity
-  verification in the threat model of a personal backup tool.
-
----
-
-## Path normalization
-
-All paths stored in the database follow these rules:
-
-1. Relative to the game directory root.
-2. Forward slash `/` as the directory separator on all platforms.
-3. No leading or trailing slash.
-4. UTF-8 encoded.
-
-Normalization is applied at both `snap` time and `restore` time.
-
----
-
-## Ignore patterns
-
-Ignore patterns are evaluated in order and merged:
-
-1. **Built-in defaults** (`*.tmp`, `*.temp`, `*.bak`, `*.swp`, `Thumbs.db`,
-   `.DS_Store`, `desktop.ini`) — always applied.
-2. **Global** (`data/gignore`) — applies to all games.
-3. **Per-game** (`data/[alias]/.gignore`) — applies to a specific game.
-4. **In-game** (`[gameDir]/.gignore`) — lives inside the game directory.
-
-Pattern syntax follows gitignore semantics. The matching engine is the
-`ignore` crate (same one `ripgrep` uses).
-
----
-
-## Commands
-
-### `gim add`
-```
-gim add [alias] [game directory]
-    --title   [optional: display title]
-    --dataDir [optional: data directory]
-```
-
-### `gim remove`
-```
-gim remove [alias]
-    --confirm  (required: prevents accidental deletion)
-```
-
-### `gim list`
-```
-gim list
-    --details    (optional: show all columns from games.db)
-    --json       (optional: output as JSON)
-```
-
-### `gim snap`
-```
-gim snap [alias]
-    --id         [optional: custom snapshot ID]
-    -m/--msg     [optional: snapshot message]
-    -t/--threads [optional: thread count for hashing]
-    --dry-run    [optional: preview changes without writing]
-    --full-hash  [optional: bypass mtime+size pre-filter, hash every file]
-```
-
-### `gim restore`
-```
-gim restore [alias] [target snapshot ID]
-    --full       [optional: skip current-state hashing, overwrite everything]
-    -t/--threads [optional: thread count]
-    --dry-run    [optional: preview changes without modifying files]
-```
-
-### `gim status`
-```
-gim status [alias]
-    -t/--threads [optional: thread count]
-    --json       [optional: output as JSON]
-    --full-hash  [optional: bypass mtime+size pre-filter, hash every file]
-```
-
-### `gim log`
-```
-gim log [alias]
-    --oneline   [optional: one snapshot per line]
-    --json      [optional: output as JSON]
-    -n [number] [optional: limit number of entries]
-```
-
-### `gim diff`
-```
-gim diff [alias] [snapshot ID A] [snapshot ID B]
-    --stat      [optional: show summary statistics only]
-    --json      [optional: output as JSON]
-```
-
-### `gim gc`
-```
-gim gc [alias]
-    --dry-run  [optional: preview without deleting]
-```
-
-### `gim ignore`
-```
-gim ignore [alias]
-    --add [pattern]
-    --remove [pattern]
-    --list
-    --edit   [opens .gignore in $EDITOR]
+├── locking/mod.rs       Advisory file locks
+├── config/mod.rs        Path resolution + GIM_DATA_DIR
+├── output/              Colorizer + formatting
+└── parallel/mod.rs      Rayon re-exports
 ```
 
 ---
 
 ## Concurrency & atomicity
 
-- **Advisory locking**: a sentinel file `data/[alias]/snaps.db.lock` is
-  exclusively locked for the duration of every `snap` and `restore`.
-- **WAL mode**: `snaps.db` uses SQLite WAL journal mode.
-- **Atomic snap**: the snapshot record, all file rows, and all deleted-file
-  rows are inserted inside a single SQLite transaction.
-- **Atomic object writes**: every object is written to a `.tmp` sibling,
-  fsync'd, and atomically renamed.
-- **Integrity check**: every `snaps.db` connection runs
-  `PRAGMA integrity_check` on open.
+- **Advisory locking**: `data/[alias]/snaps.db.lock` is exclusively locked
+  for `snap`, `restore`, `delete`, and `branch --switch`.
+- **WAL mode** + `PRAGMA integrity_check` on every connection.
+- **Atomic snap**: snapshot row + files + deleted_files + branch advance in
+  one transaction.
+- **Atomic delete**: re-parenting + file deletion + snap deletion in one
+  transaction.
+- **Atomic CAS writes**: `.tmp` → fsync → rename.
 
 ---
 
 ## Environment variables
 
-| Variable       | Effect                                                              |
-|----------------|---------------------------------------------------------------------|
-| `GIM_DATA_DIR` | Override the data directory (default: `[gim binary dir]/data`).    |
-| `NO_COLOR`     | Disable colored output (also auto-disabled when stdout isn't a TTY).|
-| `EDITOR`       | Editor used by `gim ignore --edit` (default: `vi` / `notepad`).    |
+| Variable | Effect |
+|----------|--------|
+| `GIM_DATA_DIR` | Override data directory. |
+| `NO_COLOR` | Disable colored output. |
+| `EDITOR` | Editor for `gim ignore --edit`. |
 
 ---
 
 ## Testing
 
 ```bash
-cargo test --lib     # 29 unit tests
-cargo test           # includes integration tests
+cargo test --lib     # 35 unit tests
 ```
+
+Tests cover: path normalization, XXH3 hashing, ignore patterns, SQLite
+schema + migrations, branch CRUD, current-branch roundtrip, children-of
+queries, CAS dedup, diff algorithm, and the mtime+size smart pre-filter.
 
 ---
 
 ## Toolchain
 
-- Rust **1.85.0** (edition 2021, `rust-version = "1.85"`)
-- All dependencies are pinned to specific minor versions in `Cargo.toml`.
+- Rust **1.85.0** (edition 2021)
+- All dependencies pinned to specific minor versions.
 
 ### Key dependencies
 
-| Crate               | Version  | Purpose                                       |
-|---------------------|----------|-----------------------------------------------|
-| `clap`              | 4.5.20   | CLI argument parsing (derive)                 |
-| `rusqlite`          | 0.32.1   | SQLite (bundled — no system libsqlite3 needed)|
-| `xxhash-rust`       | 0.8.12   | XXH3-128 hashing                              |
-| `walkdir`           | 2.5.0    | Recursive directory walking                   |
-| `ignore`            | 0.4.23   | gitignore-compatible pattern matching         |
-| `rayon`             | 1.10.0   | Parallel hashing pipeline                     |
-| `filetime`          | 0.2.25   | Set mtime on restored files                   |
-| `fs2`               | 0.4.3    | Advisory file locking                         |
-| `serde`/`serde_json`| 1.0.x    | `--json` output                               |
-| `chrono`            | 0.4.38   | Timestamp formatting + snapshot IDs           |
-| `colored`           | 2.1.0    | Terminal colors                               |
-| `anyhow`/`thiserror`| 1.0.x    | Error handling                                |
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `clap` | 4.5.20 | CLI parsing |
+| `rusqlite` | 0.32.1 | SQLite (bundled) |
+| `xxhash-rust` | 0.8.12 | XXH3-128 hashing |
+| `walkdir` | 2.5.0 | Directory walking |
+| `ignore` | 0.4.23 | gitignore matching |
+| `rayon` | 1.10.0 | Parallel hashing |
+| `filetime` | 0.2.25 | Set mtime on restored files |
+| `fs2` | 0.4.3 | Advisory locking |
+| `serde`/`serde_json` | 1.0.x | JSON output |
+| `chrono` | 0.4.38 | Timestamps + snapshot IDs |
 
 ---
 
