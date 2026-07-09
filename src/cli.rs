@@ -4,12 +4,12 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "gim", version, about = "Game files version control tool")]
 pub struct Cli {
-    #[arg(long, global = true)]
-    pub no_color: bool,
-    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
-    pub verbose: u8,
-    #[command(subcommand)]
-    pub command: Command,
+    #[arg(long, global = true)] pub no_color: bool,
+    /// Disable progress spinner/bar (also disabled if stderr is not a TTY
+    /// or if GIM_NO_PROGRESS env var is set).
+    #[arg(long, global = true)] pub no_progress: bool,
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)] pub verbose: u8,
+    #[command(subcommand)] pub command: Command,
 }
 
 #[derive(Subcommand, Debug)]

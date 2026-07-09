@@ -1,9 +1,6 @@
-//! Database layer.
-
 pub mod games;
 pub mod schema;
 pub mod snaps;
-
 pub use games::GamesDb;
 pub use snaps::{diff_states, Branch, Diff, FileEntry, FileMeta, Snap, SnapsDb};
 
