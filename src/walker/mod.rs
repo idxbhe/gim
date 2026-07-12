@@ -32,9 +32,6 @@ impl Default for WalkOptions {
 }
 
 /// Walk + hash with progress reporting.
-///
-/// `progress` controls the visual feedback. When `progress.enabled()` is
-/// false, all tick calls are no-ops (zero overhead).
 pub fn walk_and_hash(
     game_dir: &Path,
     ignore_set: &IgnoreSet,
@@ -75,7 +72,6 @@ pub fn walk_and_hash(
                         Err(e) => HashResult::Locked { file_path: normalized.clone(), error: format!("{e}") },
                     }
                 };
-                // Tick AFTER processing — shows files completed, not started.
                 progress.hash_tick();
                 result
             })
@@ -129,15 +125,48 @@ fn collect_candidates_parallel(
             let ig = ignore_set2.clone();
             Box::new(move |entry| {
                 let entry = match entry { Ok(e) => e, Err(_) => return ignore::WalkState::Continue };
-                if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) { return ignore::WalkState::Continue; }
+                let ft = match entry.file_type() { Some(ft) => ft, None => return ignore::WalkState::Continue };
                 let rel = match entry.path().strip_prefix(&gd) { Ok(r) => r, Err(_) => return ignore::WalkState::Continue };
                 let rel_str = match rel.to_str() { Some(s) => s, None => return ignore::WalkState::Continue };
                 let norm = path_utils::to_forward_slash(rel_str);
-                if ig.is_ignored(&norm, false) { return ignore::WalkState::Continue; }
-                let meta = match std::fs::symlink_metadata(entry.path()) { Ok(m) => m, Err(_) => return ignore::WalkState::Continue };
-                let size = meta.len() as i64;
-                let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-                let _ = tx.send((entry.path().to_path_buf(), norm, size, mtime));
+
+                // For directories: check if ignored. If so, skip the
+                // entire subtree. This is critical for directory patterns
+                // like `TFCInstallerBackups/` — without this, files
+                // inside the directory would still be visited because
+                // `is_ignored(path, is_dir=false)` on a file inside an
+                // ignored dir does NOT match the directory-only pattern.
+                if ft.is_dir() {
+                    if !norm.is_empty() && ig.is_ignored(&norm, true) {
+                        return ignore::WalkState::Skip;
+                    }
+                    return ignore::WalkState::Continue;
+                }
+
+                // For files: check if the file itself is ignored, OR
+                // if any of its ancestor directories are ignored (belt-
+                // and-suspenders; the Skip above should handle dirs,
+                // but this catches edge cases like symlinks).
+                if ft.is_file() {
+                    if ig.is_ignored(&norm, false) {
+                        return ignore::WalkState::Continue;
+                    }
+                    // Check ancestors for directory-ignore patterns.
+                    // Walk through each prefix path to see if any
+                    // ancestor dir matches an ignore pattern.
+                    let mut path_parts: Vec<&str> = norm.split('/').collect();
+                    while path_parts.len() > 1 {
+                        path_parts.pop();
+                        let ancestor = path_parts.join("/");
+                        if ig.is_ignored(&ancestor, true) {
+                            return ignore::WalkState::Continue;
+                        }
+                    }
+                    let meta = match std::fs::symlink_metadata(entry.path()) { Ok(m) => m, Err(_) => return ignore::WalkState::Continue };
+                    let size = meta.len() as i64;
+                    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+                    let _ = tx.send((entry.path().to_path_buf(), norm, size, mtime));
+                }
                 ignore::WalkState::Continue
             })
         });

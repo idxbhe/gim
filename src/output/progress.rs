@@ -30,11 +30,11 @@ const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 ///
 /// - `━` (U+2501, heavy horizontal) = fill — widely supported
 /// - `╌` (U+254C, light dashed) = track — widely supported
-///
-/// Both are in the Box Drawing / Block Elements blocks, supported by
-/// virtually every monospace font including Windows Terminal and
-/// modern cmd.exe. We use 2 chars (no partial) for the clean pip look.
 const BAR_CHARS: &str = "━╌";
+
+/// Width of the clear-space used to erase residual bar output on
+/// finish. 120 covers typical terminal widths.
+const CLEAR_WIDTH: usize = 120;
 
 pub struct ProgressReporter {
     enabled: bool,
@@ -65,13 +65,12 @@ impl ProgressReporter {
                     .tick_strings(SPINNER_FRAMES),
             );
             pb.set_message(format!("{label}..."));
+            pb.set_draw_target(ProgressDrawTarget::stderr());
             pb
         } else {
             let pb = ProgressBar::new(total as u64);
             // Enable steady tick so the {spinner} keeps rotating even
             // when a single large file takes a long time to process.
-            // Without this, the spinner only advances on inc() calls,
-            // making it look frozen during slow operations.
             pb.enable_steady_tick(Duration::from_millis(80));
             pb.set_style(
                 ProgressStyle::with_template(
@@ -85,6 +84,8 @@ impl ProgressReporter {
             pb.set_draw_target(ProgressDrawTarget::stderr());
             pb
         };
+        // Force an immediate draw so the bar appears instantly.
+        bar.tick();
         *self.bar.lock().unwrap() = Some(bar);
     }
 
@@ -97,34 +98,42 @@ impl ProgressReporter {
     /// the bar is cleared. Pass empty string to skip.
     ///
     /// On Windows cmd.exe, `indicatif`'s `finish_and_clear()` may not
-    /// properly erase the bar line (ANSI clear sequences aren't always
-    /// supported). We manually overwrite the line with spaces as a
-    /// fallback, then print the summary on a fresh line.
+    /// properly erase the bar line. We use a multi-step clear:
+    /// 1. `finish_and_clear()` — indicatif's native clear (ANSI)
+    /// 2. Carriage-return + spaces + carriage-return — brute-force
+    ///    overwrite for terminals that don't honor ANSI clear
+    /// 3. Newline — move to a fresh line for the summary
     pub fn phase_done(&self, summary: &str) {
         if !self.enabled { return; }
         let mut guard = self.bar.lock().unwrap();
         if let Some(b) = guard.take() {
+            // Disable steady tick before clearing so no new frame
+            // draws after we've cleared.
+            b.disable_steady_tick();
             b.finish_and_clear();
             drop(guard);
-            // Fallback clear: overwrite the entire line with spaces,
-            // then carriage-return to start. This handles terminals
-            // where indicatif's clear sequence didn't work (notably
-            // legacy Windows cmd.exe).
-            eprint!("\r{}\r", " ".repeat(100));
+            // Brute-force clear the line. \r moves to column 0, spaces
+            // overwrite any residual characters, \r moves back to
+            // column 0 so the summary starts at the beginning.
+            eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
             if !summary.is_empty() {
                 eprintln!("  {summary}");
             } else {
-                // No summary — still need a newline to move past the
-                // cleared line.
-                eprintln!();
+                // No summary — still flush the cleared line.
+                eprint!("\r");
             }
+            // Flush stderr to ensure the clear is written before any
+            // subsequent stdout output (e.g. from `println!`).
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
         }
     }
 
     fn phase_clear(&self) {
         if let Some(b) = self.bar.lock().unwrap().take() {
+            b.disable_steady_tick();
             b.finish_and_clear();
-            eprint!("\r{}\r", " ".repeat(100));
+            eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
         }
     }
 
@@ -210,17 +219,12 @@ mod tests {
 
     #[test]
     fn bar_chars_has_at_least_two() {
-        // indicatif's progress_chars() panics with fewer than 2 chars.
-        // This test guards against regression.
         let count = BAR_CHARS.chars().count();
         assert!(count >= 2, "BAR_CHARS must have at least 2 chars, got {count}: {BAR_CHARS:?}");
     }
 
     #[test]
     fn enabled_reporter_does_not_panic() {
-        // Regression test: creating a progress bar with a known total
-        // must not panic. This catches the "at least 2 progress chars
-        // required" bug that crashed `gim status` on Windows.
         let r = ProgressReporter::new(true);
         r.hash_start(100);
         r.hash_tick();

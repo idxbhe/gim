@@ -9,6 +9,11 @@ use serde::Serialize;
 #[derive(Serialize)] struct Sj { alias: String, branch: Option<String>, last_snapshot: Option<String>, modified: Vec<String>, added: Vec<String>, deleted: Vec<String> }
 
 pub fn run(c: &Colorizer, alias: String, threads: Option<usize>, json: bool, full_hash: bool, progress: &ProgressReporter) -> GResult<()> {
+    // Show a spinner IMMEDIATELY so the user sees feedback on Enter.
+    if !json {
+        progress.phase_start("preparing", 0);
+    }
+
     let mut paths = Paths::from_env()?;
     if let Some(o) = env_data_dir_override() { paths = paths.with_data_dir(o); }
     paths.ensure_data_dir()?;
@@ -19,6 +24,11 @@ pub fn run(c: &Colorizer, alias: String, threads: Option<usize>, json: bool, ful
     let cur = sdb.get_current_branch()?.ok_or_else(|| GError::NoSnapshots(alias.clone()))?;
     let pf = sdb.files_for_snapshot(&cur.snapshot_id)?;
     let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
+
+    if !json {
+        progress.phase_done("");
+    }
+
     let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash, ..WalkOptions::default() };
     let ref_map = if full_hash { None } else { Some(&pf) };
     let (hashed, _) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress)?;

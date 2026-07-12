@@ -1,7 +1,6 @@
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::{diff_states, FileEntry, FileMeta, GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
-use crate::hashing::Hash;
 use crate::ignore_mod;
 use crate::locking;
 use crate::output::{Colorizer, ProgressReporter};
@@ -11,13 +10,18 @@ use crate::walker::{walk_and_hash, WalkOptions};
 use std::collections::HashMap;
 
 pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<String>, threads: Option<usize>, dry_run: bool, full_hash: bool, progress: &ProgressReporter) -> GResult<()> {
+    // ── Show a spinner IMMEDIATELY so the user sees feedback the
+    //    moment they press Enter. The DB/lock setup below takes a few
+    //    hundred ms, and without this the terminal looks frozen.
+    progress.phase_start("preparing", 0);
+
     let mut paths = Paths::from_env()?;
     if let Some(o) = env_data_dir_override() { paths = paths.with_data_dir(o); }
     paths.ensure_data_dir()?;
     let gdb = GamesDb::open(&paths.games_db)?;
     let game = gdb.get(&alias)?.ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
-    if !game.game_dir.exists() { return Err(GError::GameDirMissing(game.game_dir.clone())); }
-    if !game.game_dir.is_dir() { return Err(GError::GameDirNotDir(game.game_dir.clone())); }
+    if !game.game_dir.exists() { progress.phase_done(""); return Err(GError::GameDirMissing(game.game_dir.clone())); }
+    if !game.game_dir.is_dir() { progress.phase_done(""); return Err(GError::GameDirNotDir(game.game_dir.clone())); }
     let sdb_path = paths.snaps_db(&alias);
     let mut sdb = SnapsDb::open(&sdb_path)?;
     let _lock = locking::acquire_game_lock(&alias, &sdb_path)?;
@@ -27,7 +31,7 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let cbn = cur.as_ref().map(|b| b.name.clone());
 
     let sid = match custom_id {
-        Some(id) => { validate_id(&id)?; if sdb.get_snapshot(&id)?.is_some() { return Err(GError::SnapshotIdExists(id, alias.clone())); } id }
+        Some(id) => { validate_id(&id)?; if sdb.get_snapshot(&id)?.is_some() { progress.phase_done(""); return Err(GError::SnapshotIdExists(id, alias.clone())); } id }
         None => match &pid {
             None => "original".to_string(),
             Some(_) => { let base = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string(); let mut cand = base.clone(); let mut s = 2u32; while sdb.get_snapshot(&cand)?.is_some() { cand = format!("{base}-{s}"); s += 1; } cand }
@@ -36,6 +40,10 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
 
     let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
     let pf = match &pid { Some(p) => sdb.files_for_snapshot(p)?, None => HashMap::new() };
+
+    // Preparing done — clear the spinner before walk phase starts.
+    progress.phase_done("");
+
     let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash, ..WalkOptions::default() };
     let ref_map = if full_hash { None } else { Some(&pf) };
     let (hashed, locked) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress)?;
@@ -51,7 +59,6 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     cas.ensure()?;
     let mut written = Vec::new();
     let nm: Vec<&crate::walker::HashedFile> = hashed.iter().filter(|f| match pf.get(&f.file_path) { None => true, Some(pm) => pm.hash != f.hash }).collect();
-    // Count how many actually need CAS store (not already present).
     let to_store: Vec<&&crate::walker::HashedFile> = nm.iter().filter(|f| !cas.exists(&f.hash)).collect();
     progress.store_start(to_store.len());
     for f in &to_store {
