@@ -65,20 +65,77 @@ impl SnapsDb {
         tx.execute("INSERT INTO snaps (snapshotId, parentSnapId, timestamp, message, fileCount, addedSize) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sid, pid, ts, msg, fc, asz])?; Ok(())
     }
     pub fn insert_files(tx: &rusqlite::Transaction<'_>, sid: &str, files: &[FileEntry]) -> GResult<()> {
-        // Use prepare_cached for statement reuse — avoids re-parsing
-        // SQL on every row. The statement is compiled once and reused
-        // across all execute() calls in this loop.
-        let mut stmt = tx.prepare_cached("INSERT INTO files (snapshotId, filePath, hash, fileSize, modifiedTime) VALUES (?1, ?2, ?3, ?4, ?5)")?;
-        for f in files {
-            stmt.execute(params![sid, f.file_path, f.hash.as_str(), f.file_size, f.modified_time])?;
+        // Batch INSERT for performance. Instead of N individual execute
+        // calls, we build one statement with multiple VALUE tuples.
+        // SQLite variable limit is 999 (default) or 32766 (newer).
+        // We use 100 rows × 5 cols = 500 vars per batch, safely under.
+        const BATCH_SIZE: usize = 100;
+        if files.is_empty() { return Ok(()); }
+
+        for chunk in files.chunks(BATCH_SIZE) {
+            let mut sql = String::from(
+                "INSERT INTO files (snapshotId, filePath, hash, fileSize, modifiedTime) VALUES ",
+            );
+            for (i, _) in chunk.iter().enumerate() {
+                if i > 0 { sql.push(','); }
+                let base = i * 5 + 1;
+                sql.push_str(&format!(
+                    "(?{base},?{},?{},?{},?{})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4
+                ));
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            // Build params vector. We need references that outlive the
+            // execute call. String literals (sid) and borrowed fields
+            // (file_path, file_size, modified_time) are fine. For hash,
+            // we convert to String first, then borrow.
+            let hash_strs: Vec<String> = chunk.iter().map(|f| f.hash.0.clone()).collect();
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .enumerate()
+                .flat_map(|(i, f)| {
+                    vec![
+                        &sid as &dyn rusqlite::ToSql,
+                        &f.file_path as &dyn rusqlite::ToSql,
+                        &hash_strs[i] as &dyn rusqlite::ToSql,
+                        &f.file_size as &dyn rusqlite::ToSql,
+                        &f.modified_time as &dyn rusqlite::ToSql,
+                    ]
+                })
+                .collect();
+            stmt.execute(rusqlite::params_from_iter(params))?;
         }
         Ok(())
     }
 
     pub fn insert_deleted_files(tx: &rusqlite::Transaction<'_>, sid: &str, files: &[String]) -> GResult<()> {
-        let mut stmt = tx.prepare_cached("INSERT INTO deleted_files (snapshotId, filePath) VALUES (?1, ?2)")?;
-        for f in files {
-            stmt.execute(params![sid, f])?;
+        // Batch INSERT. 2 vars per row, so 499 rows = 998 vars (under 999 limit).
+        const BATCH_SIZE: usize = 499;
+        if files.is_empty() { return Ok(()); }
+
+        for chunk in files.chunks(BATCH_SIZE) {
+            let mut sql = String::from(
+                "INSERT INTO deleted_files (snapshotId, filePath) VALUES ",
+            );
+            for (i, _) in chunk.iter().enumerate() {
+                if i > 0 { sql.push(','); }
+                let base = i * 2 + 1;
+                sql.push_str(&format!("(?{base},?{})", base + 1));
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .flat_map(|f| {
+                    vec![
+                        &sid as &dyn rusqlite::ToSql,
+                        f as &dyn rusqlite::ToSql,
+                    ]
+                })
+                .collect();
+            stmt.execute(rusqlite::params_from_iter(params))?;
         }
         Ok(())
     }

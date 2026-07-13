@@ -1,8 +1,7 @@
 use crate::error::{GError, GResult};
 use crate::hashing::Hash;
 use crate::path_utils;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,8 +14,6 @@ impl Cas {
     pub fn ensure(&self) -> GResult<()> {
         fs::create_dir_all(&self.objects_dir)?;
         // Cleanup any stale .tmp.* files from previous crashes.
-        // This is cheap (one readdir per prefix subdir) and prevents
-        // permanent tmp file leaks.
         self.cleanup_tmp_files()?;
         Ok(())
     }
@@ -48,6 +45,11 @@ impl Cas {
     /// `copy_file_range` (kernel-space copy, zero user-space buffer),
     /// and on macOS uses `fcopyfile`. This is significantly faster than
     /// manual `io::copy` for large game files.
+    ///
+    /// The tmp file is protected by a RAII guard (`TmpGuard`) that
+    /// automatically deletes it on drop — whether the function returns
+    /// Ok, Err, or panics. This is more robust than manual cleanup in
+    /// error paths.
     pub fn store_from(&self, src: &Path, hash: &Hash) -> GResult<()> {
         let final_path = self.path_for(hash);
         if final_path.exists() { return Ok(()); }
@@ -56,9 +58,12 @@ impl Cas {
         let pid = std::process::id();
         let tmp_path = final_path.with_extension(format!("tmp.{pid}.{cnt}"));
 
+        // RAII guard: if we exit this function for ANY reason (early
+        // return, error, panic) without explicitly calling `keep()`,
+        // the tmp file is deleted. This prevents leaks even on panic.
+        let mut guard = TmpGuard::new(&tmp_path);
+
         // Use std::fs::copy for OS-optimized file copy.
-        // On Linux: copy_file_range (kernel-space, zero user copy).
-        // On macOS: fcopyfile. On Windows: CopyFileEx.
         std::fs::copy(src, &tmp_path)?;
 
         // fsync the tmp file to ensure durability before rename.
@@ -67,9 +72,18 @@ impl Cas {
         }
 
         match fs::rename(&tmp_path, &final_path) {
-            Ok(()) => Ok(()),
-            Err(_) if final_path.exists() => { let _ = fs::remove_file(&tmp_path); Ok(()) }
-            Err(e) => { let _ = fs::remove_file(&tmp_path); Err(GError::Io(e)) }
+            Ok(()) => {
+                // Rename succeeded — tmp file no longer exists.
+                // Tell the guard NOT to delete (the file is gone).
+                guard.keep();
+                Ok(())
+            }
+            Err(_) if final_path.exists() => {
+                // Another process won the race — our tmp file will be
+                // deleted by the guard on drop.
+                Ok(())
+            }
+            Err(e) => Err(GError::Io(e)),
         }
     }
 
@@ -112,5 +126,94 @@ impl Cas {
             }
         }
         Ok(out)
+    }
+}
+
+/// RAII guard for a temporary file. Deletes the file on drop unless
+/// `keep()` was called. This ensures tmp files are cleaned up even on
+/// panic or early return — no manual cleanup needed in error paths.
+struct TmpGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TmpGuard {
+    fn new(path: &Path) -> Self {
+        Self { path: path.to_path_buf(), keep: false }
+    }
+
+    /// Mark the file as successfully handled — don't delete on drop.
+    fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            // Best-effort delete — ignore errors (file may already be gone).
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn store_dedupes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = Cas::new(tmp.path().join("objects"));
+        cas.ensure().unwrap();
+        let mut src = tempfile::NamedTempFile::new().unwrap();
+        writeln!(src, "hello").unwrap();
+        src.flush().unwrap();
+        let h = Hash("aabbccddeeff00112233445566778899".into());
+        cas.store_from(src.path(), &h).unwrap();
+        cas.store_from(src.path(), &h).unwrap(); // no-op
+        assert!(cas.exists(&h));
+    }
+
+    #[test]
+    fn tmp_guard_deletes_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().join("test.tmp.123");
+        std::fs::write(&tmp_path, b"data").unwrap();
+        assert!(tmp_path.exists());
+        {
+            let _guard = TmpGuard::new(&tmp_path);
+            // guard drops here, should delete file
+        }
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn tmp_guard_keep_preserves_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().join("test.tmp.456");
+        std::fs::write(&tmp_path, b"data").unwrap();
+        {
+            let mut guard = TmpGuard::new(&tmp_path);
+            guard.keep();
+            // guard drops here, but keep() was called
+        }
+        assert!(tmp_path.exists());
+    }
+
+    #[test]
+    fn store_from_cleans_tmp_on_success() {
+        // After successful store_from, no .tmp.* files should remain.
+        let tmp = tempfile::tempdir().unwrap();
+        let cas = Cas::new(tmp.path().join("objects"));
+        cas.ensure().unwrap();
+        let mut src = tempfile::NamedTempFile::new().unwrap();
+        writeln!(src, "hello").unwrap();
+        src.flush().unwrap();
+        let h = Hash("aabbccddeeff00112233445566778899".into());
+        cas.store_from(src.path(), &h).unwrap();
+        let tmps = cas.list_tmp_files().unwrap();
+        assert!(tmps.is_empty(), "tmp files leaked: {:?}", tmps);
     }
 }
