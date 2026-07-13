@@ -1,4 +1,4 @@
-use crate::config::{env_data_dir_override, Paths};
+use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::{diff_states, GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::ignore_mod;
@@ -29,7 +29,15 @@ pub fn run(c: &Colorizer, alias: String, threads: Option<usize>, json: bool, ful
         progress.phase_cancel();
     }
 
-    let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash, ..WalkOptions::default() };
+    let cfg = GimConfig::load_game(&paths, &alias)?;
+    let algorithm = cfg.hash_algorithm()?;
+    let cfg_threads = cfg.hash_threads();
+    let wo = WalkOptions {
+        threads: threads.unwrap_or(cfg_threads),
+        full_hash,
+        algorithm,
+        ..WalkOptions::default()
+    };
     let ref_map = if full_hash { None } else { Some(&pf) };
     let (hashed, _) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress)?;
     let mut cm = std::collections::HashMap::with_capacity(hashed.len());

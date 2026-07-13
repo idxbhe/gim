@@ -1,4 +1,4 @@
-use crate::config::{env_data_dir_override, Paths};
+use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::{diff_states, GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::hashing::Hash;
@@ -81,7 +81,10 @@ fn switch_b(sdb: &mut SnapsDb, paths: &Paths, c: &Colorizer, alias: &str, gd: &P
         if let Some(cur) = &cur {
             let pf = sdb.files_for_snapshot(&cur.snapshot_id)?;
             let ig = ignore_mod::build_for_game(paths, alias, gd)?;
-            let (hashed, _) = walk_and_hash(gd, &ig, Some(&pf), &WalkOptions::default(), progress)?;
+            let cfg = GimConfig::load_game(paths, alias)?;
+            let algorithm = cfg.hash_algorithm()?;
+            let wo = WalkOptions { algorithm, ..WalkOptions::default() };
+            let (hashed, _) = walk_and_hash(gd, &ig, Some(&pf), &wo, progress)?;
             let mut cm = HashMap::with_capacity(hashed.len());
             for f in hashed { cm.insert(f.file_path, crate::db::FileMeta { hash: f.hash, file_size: f.file_size, modified_time: f.modified_time }); }
             if diff_states(&pf, &cm).total_changes() > 0 { return Err(GError::UncommittedChanges); }

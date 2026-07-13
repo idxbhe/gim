@@ -26,4 +26,28 @@ pub enum Command {
     Branch { alias: String, #[arg(long = "create")] create: Option<String>, #[arg(long = "delete")] delete: Option<String>, #[arg(long = "switch")] switch: Option<String>, #[arg(long = "from")] from: Option<String>, #[arg(long)] force: bool, #[arg(long)] json: bool },
     Gc { alias: String, #[arg(long = "dry-run")] dry_run: bool },
     Ignore { alias: String, #[arg(long = "add")] add: Option<String>, #[arg(long = "remove")] remove: Option<String>, #[arg(long)] list: bool, #[arg(long)] edit: bool },
+    /// Get or set configuration. Without alias, operates on global config.
+    /// With alias, operates on per-game config.
+    Config {
+        /// Game alias. If omitted, operates on global config.
+        alias: Option<String>,
+        /// Get value for a key.
+        #[arg(long)]
+        get: Option<String>,
+        /// Set a key=value pair. Format: --set key value
+        #[arg(long, num_args = 2, value_names = ["KEY", "VALUE"])]
+        set: Option<Vec<String>>,
+        /// Unset a key (fall back to default/global).
+        #[arg(long)]
+        unset: Option<String>,
+        /// List all config.
+        #[arg(long)]
+        list: bool,
+        /// Skip confirmation prompt (for hash.algorithm changes that
+        /// require rehash).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Migrate database schema to latest version.
+    Migrate { alias: Option<String> },
 }

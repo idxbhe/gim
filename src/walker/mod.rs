@@ -1,15 +1,8 @@
 //! Parallel file walker + hasher with mtime+size pre-filter + progress.
-//!
-//! The walker accepts an optional [`ProgressReporter`] that displays:
-//! - A spinner during the walk phase (unknown total).
-//! - A progress bar during the hash phase (known total, with percentage).
-//!
-//! Progress output goes to stderr (via indicatif), so stdout (including
-//! `--json` output) is never corrupted.
 
 use crate::db::FileMeta;
 use crate::error::GResult;
-use crate::hashing::{hash_file_with_retry, Hash};
+use crate::hashing::{hash_file_with_retry, Hash, HashAlgorithm};
 use crate::ignore_mod::IgnoreSet;
 use crate::output::ProgressReporter;
 use crate::parallel;
@@ -26,9 +19,23 @@ pub struct HashedFile { pub file_path: String, pub hash: Hash, pub file_size: i6
 pub struct LockedFile { pub file_path: String, pub error: String }
 
 #[derive(Debug, Clone)]
-pub struct WalkOptions { pub threads: usize, pub max_retries: u32, pub retry_delay: Duration, pub full_hash: bool }
+pub struct WalkOptions {
+    pub threads: usize,
+    pub max_retries: u32,
+    pub retry_delay: Duration,
+    pub full_hash: bool,
+    pub algorithm: HashAlgorithm,
+}
 impl Default for WalkOptions {
-    fn default() -> Self { Self { threads: 0, max_retries: 3, retry_delay: Duration::from_millis(500), full_hash: false } }
+    fn default() -> Self {
+        Self {
+            threads: 0,
+            max_retries: 3,
+            retry_delay: Duration::from_millis(500),
+            full_hash: false,
+            algorithm: HashAlgorithm::Xxhash,
+        }
+    }
 }
 
 /// Walk + hash with progress reporting.
@@ -41,6 +48,7 @@ pub fn walk_and_hash(
 ) -> GResult<(Vec<HashedFile>, Vec<LockedFile>)> {
     let use_smart = !opts.full_hash && reference.is_some();
     let reference = std::sync::Arc::new(reference.cloned().unwrap_or_default());
+    let algorithm = opts.algorithm;
 
     // ── Walk phase (parallel, spinner) ──────────────────────────────
     progress.walk_start();
@@ -66,7 +74,7 @@ pub fn walk_and_hash(
                     let m = reference.get(normalized).expect("checked");
                     HashResult::Ok { file_path: normalized.clone(), hash: m.hash.clone(), file_size: *size, modified_time: *mtime }
                 } else {
-                    match hash_file_with_retry(path, opts.max_retries, opts.retry_delay) {
+                    match hash_file_with_retry(path, algorithm, opts.max_retries, opts.retry_delay) {
                         Ok(Some((h, _))) => HashResult::Ok { file_path: normalized.clone(), hash: h, file_size: *size, modified_time: *mtime },
                         Ok(None) => HashResult::Locked { file_path: normalized.clone(), error: format!("locked after {} retries", opts.max_retries) },
                         Err(e) => HashResult::Locked { file_path: normalized.clone(), error: format!("{e}") },
@@ -130,12 +138,6 @@ fn collect_candidates_parallel(
                 let rel_str = match rel.to_str() { Some(s) => s, None => return ignore::WalkState::Continue };
                 let norm = path_utils::to_forward_slash(rel_str);
 
-                // For directories: check if ignored. If so, skip the
-                // entire subtree. This is critical for directory patterns
-                // like `TFCInstallerBackups/` — without this, files
-                // inside the directory would still be visited because
-                // `is_ignored(path, is_dir=false)` on a file inside an
-                // ignored dir does NOT match the directory-only pattern.
                 if ft.is_dir() {
                     if !norm.is_empty() && ig.is_ignored(&norm, true) {
                         return ignore::WalkState::Skip;
@@ -143,17 +145,10 @@ fn collect_candidates_parallel(
                     return ignore::WalkState::Continue;
                 }
 
-                // For files: check if the file itself is ignored, OR
-                // if any of its ancestor directories are ignored (belt-
-                // and-suspenders; the Skip above should handle dirs,
-                // but this catches edge cases like symlinks).
                 if ft.is_file() {
                     if ig.is_ignored(&norm, false) {
                         return ignore::WalkState::Continue;
                     }
-                    // Check ancestors for directory-ignore patterns.
-                    // Walk through each prefix path to see if any
-                    // ancestor dir matches an ignore pattern.
                     let mut path_parts: Vec<&str> = norm.split('/').collect();
                     while path_parts.len() > 1 {
                         path_parts.pop();

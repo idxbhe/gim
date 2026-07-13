@@ -20,6 +20,8 @@ pub enum GError {
     #[error("cannot delete the protected \"main\" branch")] CannotDeleteMainBranch,
     #[error("uncommitted changes detected — use --force to discard")] UncommittedChanges,
     #[error("snapshot \"{0}\" is referenced by {1} branch(es): {2}")] SnapshotReferencedByBranch(String, usize, String),
+    #[error("rehash cancelled by user")] RehashCancelled,
+    #[error("hash algorithm mismatch: config says \"{0}\" but snapshot data uses \"{1}\"")] HashAlgorithmMismatch(String, String),
     #[error("sqlite error: {0}")] Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")] Io(#[from] io::Error),
     #[error("path error: {0}")] Path(String),
@@ -40,7 +42,8 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::DbCorrupt(_) | GError::IgnorePattern { .. } | GError::Path(_)
         | GError::Config(_) | GError::BranchNotFound(_, _) | GError::BranchExists(_, _)
         | GError::CannotDeleteCurrentBranch(_) | GError::CannotDeleteMainBranch
-        | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _) => 2,
+        | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _)
+        | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _) => 2,
         _ => 1,
     }
 }

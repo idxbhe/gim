@@ -1,11 +1,13 @@
 pub mod add;
 pub mod branch;
+pub mod config_cmd;
 pub mod delete;
 pub mod diff;
 pub mod gc;
 pub mod ignore_cmd;
 pub mod list;
 pub mod log_cmd;
+pub mod migrate;
 pub mod remove;
 pub mod restore;
 pub mod snap;
@@ -49,6 +51,8 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Branch { alias, create, delete, switch, from, force, json } => branch::run(c, alias.clone(), create.clone(), delete.clone(), switch.clone(), from.clone(), *force, *json, p),
         Command::Gc { alias, dry_run } => gc::run(c, alias.clone(), *dry_run, p),
         Command::Ignore { alias, add, remove, list, edit } => ignore_cmd::run(c, alias.clone(), add.clone(), remove.clone(), *list, *edit),
+        Command::Config { alias, get, set, unset, list, yes } => config_cmd::run(c, alias.clone(), get.clone(), set.clone(), unset.clone(), *list, *yes, p),
+        Command::Migrate { alias } => migrate::run(c, alias.clone()),
     }
 }
 

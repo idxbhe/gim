@@ -42,6 +42,7 @@ filetime = "0.2.25"
 fs2 = "0.4.3"
 colored = "2.1.0"
 dirs = "5.0.1"
+blake3 = "1.5.5"
 log = "0.4.22"
 env_logger = "0.11.5"
 

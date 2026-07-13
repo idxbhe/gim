@@ -1,6 +1,9 @@
 use crate::error::{GError, GResult};
 use std::path::{Path, PathBuf};
 
+pub mod gim_config;
+pub use gim_config::GimConfig;
+
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub binary_dir: PathBuf, pub data_dir: PathBuf, pub games_db: PathBuf, pub global_gignore: PathBuf,

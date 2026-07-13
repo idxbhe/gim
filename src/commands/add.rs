@@ -1,4 +1,4 @@
-use crate::config::{env_data_dir_override, Paths};
+use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::{GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::output::Colorizer;
@@ -17,6 +17,8 @@ pub fn run(c: &Colorizer, alias: String, game_dir: PathBuf, title: Option<String
     GamesDb::open(&paths.games_db)?.add(&alias, &title, &abs, &gdd)?;
     std::fs::create_dir_all(gdd.join("objects"))?;
     let _ = SnapsDb::open(&gdd.join("snaps.db"))?;
+    // Create per-game config by copying from global config.
+    GimConfig::create_from_global(&paths, &alias)?;
     println!("successfully added {} as {}", title, c.green(&alias));
     Ok(())
 }

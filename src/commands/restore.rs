@@ -1,4 +1,4 @@
-use crate::config::{env_data_dir_override, Paths};
+use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::{GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::hashing::Hash;
@@ -32,7 +32,10 @@ pub fn run(c: &Colorizer, alias: String, sid: String, full: bool, threads: Optio
         HashMap::new()
     } else {
         let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
-        let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash: false, ..WalkOptions::default() };
+        let cfg = GimConfig::load_game(&paths, &alias)?;
+        let algorithm = cfg.hash_algorithm()?;
+        let cfg_threads = cfg.hash_threads();
+        let wo = WalkOptions { threads: threads.unwrap_or(cfg_threads), full_hash: false, algorithm, ..WalkOptions::default() };
         let (hashed, _) = walk_and_hash(&game.game_dir, &ig, Some(&tm), &wo, progress)?;
         hashed.into_iter().map(|f| (f.file_path, crate::db::FileMeta { hash: f.hash, file_size: f.file_size, modified_time: f.modified_time })).collect()
     };
