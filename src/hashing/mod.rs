@@ -13,7 +13,7 @@
 
 use crate::error::{GError, GResult};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
 use xxhash_rust::xxh3::Xxh3;
@@ -91,9 +91,12 @@ pub fn hash_bytes(data: &[u8], algo: HashAlgorithm) -> Hash {
 }
 
 /// Hash a file on disk by streaming it through a buffer.
+///
+/// Reads directly from the File (no BufReader) since we already use a
+/// 1 MB read buffer. BufReader would add a redundant second buffer
+/// with no benefit.
 pub fn hash_file(path: &Path, algo: HashAlgorithm) -> GResult<(Hash, u64)> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(READ_BUF, file);
+    let mut file = File::open(path)?;
     let mut total: u64 = 0;
     let mut buf = vec![0u8; READ_BUF];
 
@@ -101,7 +104,7 @@ pub fn hash_file(path: &Path, algo: HashAlgorithm) -> GResult<(Hash, u64)> {
         HashAlgorithm::Xxhash => {
             let mut hasher = Xxh3::new();
             loop {
-                let n = reader.read(&mut buf)?;
+                let n = file.read(&mut buf)?;
                 if n == 0 { break; }
                 hasher.update(&buf[..n]);
                 total += n as u64;
@@ -111,7 +114,7 @@ pub fn hash_file(path: &Path, algo: HashAlgorithm) -> GResult<(Hash, u64)> {
         HashAlgorithm::Blake3 => {
             let mut hasher = blake3::Hasher::new();
             loop {
-                let n = reader.read(&mut buf)?;
+                let n = file.read(&mut buf)?;
                 if n == 0 { break; }
                 hasher.update(&buf[..n]);
                 total += n as u64;

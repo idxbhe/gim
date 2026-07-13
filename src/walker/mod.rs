@@ -25,6 +25,8 @@ pub struct WalkOptions {
     pub retry_delay: Duration,
     pub full_hash: bool,
     pub algorithm: HashAlgorithm,
+    /// If false, hash files sequentially (better for HDDs).
+    pub parallel: bool,
 }
 impl Default for WalkOptions {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Default for WalkOptions {
             retry_delay: Duration::from_millis(500),
             full_hash: false,
             algorithm: HashAlgorithm::Xxhash,
+            parallel: true,
         }
     }
 }
@@ -48,7 +51,6 @@ pub fn walk_and_hash(
 ) -> GResult<(Vec<HashedFile>, Vec<LockedFile>)> {
     let use_smart = !opts.full_hash && reference.is_some();
     let reference = std::sync::Arc::new(reference.cloned().unwrap_or_default());
-    let algorithm = opts.algorithm;
 
     // ── Walk phase (parallel, spinner) ──────────────────────────────
     progress.walk_start();
@@ -56,35 +58,29 @@ pub fn walk_and_hash(
     let walk_count = candidates.len() as u64;
     progress.walk_done(walk_count);
 
-    // ── Hash phase (parallel, progress bar) ─────────────────────────
+    // ── Hash phase ──────────────────────────────────────────────────
+    // Use parallel Rayon iter if hash.parallel=true (default, good for
+    // SSDs). Use sequential iter if false (better for HDDs — avoids
+    // disk thrashing from random parallel reads).
     progress.hash_start(candidates.len());
-    let pool = parallel::global();
-    let results: Vec<HashResult> = pool.install(|| {
+    let results: Vec<HashResult> = if opts.parallel {
+        let pool = parallel::global();
+        pool.install(|| {
+            candidates
+                .par_iter()
+                .map(|(path, normalized, size, mtime)| {
+                    hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
+                })
+                .collect()
+        })
+    } else {
         candidates
-            .par_iter()
+            .iter()
             .map(|(path, normalized, size, mtime)| {
-                let need_hash = if use_smart {
-                    match reference.get(normalized) {
-                        Some(m) => m.file_size != *size || m.modified_time != *mtime,
-                        None => true,
-                    }
-                } else { true };
-
-                let result = if !need_hash {
-                    let m = reference.get(normalized).expect("checked");
-                    HashResult::Ok { file_path: normalized.clone(), hash: m.hash.clone(), file_size: *size, modified_time: *mtime }
-                } else {
-                    match hash_file_with_retry(path, algorithm, opts.max_retries, opts.retry_delay) {
-                        Ok(Some((h, _))) => HashResult::Ok { file_path: normalized.clone(), hash: h, file_size: *size, modified_time: *mtime },
-                        Ok(None) => HashResult::Locked { file_path: normalized.clone(), error: format!("locked after {} retries", opts.max_retries) },
-                        Err(e) => HashResult::Locked { file_path: normalized.clone(), error: format!("{e}") },
-                    }
-                };
-                progress.hash_tick();
-                result
+                hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
             })
             .collect()
-    });
+    };
     let hash_count = results.len() as u64;
     progress.hash_done(hash_count);
 
@@ -102,6 +98,39 @@ pub fn walk_and_hash(
 enum HashResult {
     Ok { file_path: String, hash: Hash, file_size: i64, modified_time: i64 },
     Locked { file_path: String, error: String },
+}
+
+/// Hash a single file. Extracted so both parallel and sequential
+/// paths use identical logic.
+fn hash_one(
+    path: &Path,
+    normalized: &str,
+    size: i64,
+    mtime: i64,
+    reference: &HashMap<String, FileMeta>,
+    opts: &WalkOptions,
+    use_smart: bool,
+    progress: &ProgressReporter,
+) -> HashResult {
+    let need_hash = if use_smart {
+        match reference.get(normalized) {
+            Some(m) => m.file_size != size || m.modified_time != mtime,
+            None => true,
+        }
+    } else { true };
+
+    let result = if !need_hash {
+        let m = reference.get(normalized).expect("checked");
+        HashResult::Ok { file_path: normalized.to_string(), hash: m.hash.clone(), file_size: size, modified_time: mtime }
+    } else {
+        match hash_file_with_retry(path, opts.algorithm, opts.max_retries, opts.retry_delay) {
+            Ok(Some((h, _))) => HashResult::Ok { file_path: normalized.to_string(), hash: h, file_size: size, modified_time: mtime },
+            Ok(None) => HashResult::Locked { file_path: normalized.to_string(), error: format!("locked after {} retries", opts.max_retries) },
+            Err(e) => HashResult::Locked { file_path: normalized.to_string(), error: format!("{e}") },
+        }
+    };
+    progress.hash_tick();
+    result
 }
 
 /// Walk-only (no hashing). Used by `gim restore --full`.
@@ -146,16 +175,16 @@ fn collect_candidates_parallel(
                 }
 
                 if ft.is_file() {
+                    // Check if the file itself is ignored.
+                    // Note: we don't need to check ancestors here because
+                    // when we encounter an ignored directory above, we
+                    // return WalkState::Skip which prunes the entire
+                    // subtree — so files inside ignored directories are
+                    // never visited. This avoids the expensive per-file
+                    // ancestor loop that allocated a new String per
+                    // ancestor per file.
                     if ig.is_ignored(&norm, false) {
                         return ignore::WalkState::Continue;
-                    }
-                    let mut path_parts: Vec<&str> = norm.split('/').collect();
-                    while path_parts.len() > 1 {
-                        path_parts.pop();
-                        let ancestor = path_parts.join("/");
-                        if ig.is_ignored(&ancestor, true) {
-                            return ignore::WalkState::Continue;
-                        }
                     }
                     let meta = match std::fs::symlink_metadata(entry.path()) { Ok(m) => m, Err(_) => return ignore::WalkState::Continue };
                     let size = meta.len() as i64;

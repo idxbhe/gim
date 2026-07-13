@@ -25,6 +25,7 @@ use std::str::FromStr;
 pub const DEFAULTS: &[(&str, &str)] = &[
     ("hash.algorithm", "xxhash"),
     ("hash.threads", "0"),
+    ("hash.parallel", "true"),
     ("snapshot.auto_gc", "false"),
     ("snapshot.lock_retry", "3"),
 ];
@@ -93,6 +94,12 @@ impl GimConfig {
     /// Whether to auto-gc after snap.
     pub fn auto_gc(&self) -> bool {
         self.get("snapshot.auto_gc") == "true"
+    }
+
+    /// Whether to hash files in parallel (true) or sequentially (false).
+    /// Sequential is better for HDDs (avoids disk thrashing).
+    pub fn hash_parallel(&self) -> bool {
+        self.get("hash.parallel") == "true"
     }
 
     /// Lock retry count.
@@ -193,6 +200,14 @@ pub fn validate_value(key: &str, value: &str) -> GResult<()> {
             value.parse::<usize>().map_err(|_| GError::Other(format!(
                 "invalid hash.threads value \"{value}\" (expected non-negative integer)"
             )))?;
+            Ok(())
+        }
+        "hash.parallel" => {
+            if value != "true" && value != "false" {
+                return Err(GError::Other(format!(
+                    "invalid hash.parallel value \"{value}\" (expected true|false)"
+                )));
+            }
             Ok(())
         }
         "snapshot.auto_gc" => {

@@ -65,12 +65,22 @@ impl SnapsDb {
         tx.execute("INSERT INTO snaps (snapshotId, parentSnapId, timestamp, message, fileCount, addedSize) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![sid, pid, ts, msg, fc, asz])?; Ok(())
     }
     pub fn insert_files(tx: &rusqlite::Transaction<'_>, sid: &str, files: &[FileEntry]) -> GResult<()> {
-        let mut stmt = tx.prepare("INSERT INTO files (snapshotId, filePath, hash, fileSize, modifiedTime) VALUES (?1, ?2, ?3, ?4, ?5)")?;
-        for f in files { stmt.execute(params![sid, f.file_path, f.hash.as_str(), f.file_size, f.modified_time])?; } Ok(())
+        // Use prepare_cached for statement reuse — avoids re-parsing
+        // SQL on every row. The statement is compiled once and reused
+        // across all execute() calls in this loop.
+        let mut stmt = tx.prepare_cached("INSERT INTO files (snapshotId, filePath, hash, fileSize, modifiedTime) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        for f in files {
+            stmt.execute(params![sid, f.file_path, f.hash.as_str(), f.file_size, f.modified_time])?;
+        }
+        Ok(())
     }
+
     pub fn insert_deleted_files(tx: &rusqlite::Transaction<'_>, sid: &str, files: &[String]) -> GResult<()> {
-        let mut stmt = tx.prepare("INSERT INTO deleted_files (snapshotId, filePath) VALUES (?1, ?2)")?;
-        for f in files { stmt.execute(params![sid, f])?; } Ok(())
+        let mut stmt = tx.prepare_cached("INSERT INTO deleted_files (snapshotId, filePath) VALUES (?1, ?2)")?;
+        for f in files {
+            stmt.execute(params![sid, f])?;
+        }
+        Ok(())
     }
     pub fn list_branches(&self) -> GResult<Vec<Branch>> {
         let mut stmt = self.conn.prepare("SELECT name, snapshotId, createdAt FROM branches ORDER BY name ASC")?;

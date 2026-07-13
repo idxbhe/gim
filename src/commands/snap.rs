@@ -53,6 +53,7 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
         threads: threads.unwrap_or(cfg_threads),
         full_hash,
         algorithm,
+        parallel: cfg.hash_parallel(),
         ..WalkOptions::default()
     };
     let ref_map = if full_hash { None } else { Some(&pf) };
