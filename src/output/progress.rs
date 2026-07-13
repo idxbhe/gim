@@ -1,27 +1,37 @@
-//! Pretty progress reporting — fully manual, no indicatif.
-//!
-//! Why no indicatif? Its `finish*` methods and steady-ticker leave
-//! residue on Windows cmd.exe because the terminal doesn't handle
-//! `\r`-based line overwrite the same way Unix terminals do. By
-//! implementing the progress bar manually with raw stderr writes,
-//! we have full control and can guarantee clean output.
+//! Pretty progress reporting — fully manual, no indicatif, with colors.
 //!
 //! Two phase types:
-//! - **Spinner** (unknown total): `|/-\` rotating + label + count
-//! - **Progress bar** (known total): `━╌` bar + percentage + count
+//! - **Spinner** (unknown total): cyan `|/-\` rotating + label + count
+//! - **Progress bar** (known total): green `━` fill on dim `╌` track
+//!   + yellow percentage + count
 //!
-//! When a phase finishes, the final frame shows `✓` + past-tense label
-//! + final count, on its own line.
+//! When a phase finishes, the bar is cleared and only a one-line
+//! summary is printed: `✓ walked 9744` (green checkmark + bold label
+//! + count).
 //!
 //! Output goes to stderr (so stdout / `--json` is never corrupted).
 //! Auto-disables when stderr is not a TTY or `--no-progress` /
-//! `GIM_NO_PROGRESS` is set.
+//! `GIM_NO_PROGRESS` is set. Colors auto-disable when `NO_COLOR` env
+//! var is set.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+// ── ANSI color codes ────────────────────────────────────────────────
+// We use raw ANSI codes instead of the `colored` crate for the
+// progress bar frames because they're drawn frequently by a background
+// thread and we want minimal allocation overhead.
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_WHITE: &str = "\x1b[37m";
 
 /// ASCII-only spinner frames. Works on every terminal including
 /// legacy Windows cmd.exe (braille `⠋` renders as `[?]` there).
@@ -43,25 +53,38 @@ const CLEAR_WIDTH: usize = 120;
 /// Internal state for a progress phase.
 struct PhaseState {
     count: Arc<AtomicU64>,
-    total: u64, // 0 = spinner (unknown total)
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 pub struct ProgressReporter {
     enabled: bool,
+    use_color: bool,
     phase: Mutex<Option<PhaseState>>,
 }
 
 impl ProgressReporter {
     pub fn new(enabled: bool) -> Self {
+        // Colors enabled when: progress enabled AND NO_COLOR not set.
+        let use_color = enabled && std::env::var_os("NO_COLOR").is_none();
         Self {
             enabled,
+            use_color,
             phase: Mutex::new(None),
         }
     }
 
     pub fn enabled(&self) -> bool { self.enabled }
+
+    // ── Color helpers ───────────────────────────────────────────────
+
+    fn color(&self, code: &str, s: &str) -> String {
+        if self.use_color {
+            format!("{code}{s}{ANSI_RESET}")
+        } else {
+            s.to_string()
+        }
+    }
 
     // ── Generic phase API ───────────────────────────────────────────
 
@@ -75,6 +98,7 @@ impl ProgressReporter {
         let stop = Arc::new(AtomicBool::new(false));
         let label_owned = label.to_string();
         let total_u64 = total as u64;
+        let use_color = self.use_color;
 
         // Initial draw so the bar appears instantly.
         self.draw_frame(&label_owned, 0, total_u64, 0);
@@ -90,7 +114,7 @@ impl ProgressReporter {
                 if stop_clone.load(Ordering::Relaxed) { break; }
                 let n = count_clone.load(Ordering::Relaxed);
                 let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
-                draw_frame_raw(frame, &label_for_thread, n, total_u64);
+                draw_frame_raw(frame, &label_for_thread, n, total_u64, use_color);
                 let _ = std::io::stderr().flush();
                 i += 1;
             }
@@ -98,7 +122,6 @@ impl ProgressReporter {
 
         *self.phase.lock().unwrap() = Some(PhaseState {
             count,
-            total: total_u64,
             stop,
             handle: Some(handle),
         });
@@ -112,11 +135,13 @@ impl ProgressReporter {
         }
     }
 
-    /// Finish the current phase with a checkmark.
+    /// Finish the current phase — clear the bar and print a one-line
+    /// summary with checkmark.
     ///
     /// 1. Signal the background thread to stop and join it.
-    /// 2. Brute-force clear the current line.
-    /// 3. Draw the final frame with `✓` + past-tense label + count.
+    /// 2. Brute-force clear the current line (erase the bar).
+    /// 3. Print summary: `✓ walked 9744` (green checkmark + bold
+    ///    label + count).
     /// 4. Print a newline.
     pub fn phase_done(&self, past_tense: &str) {
         if !self.enabled { return; }
@@ -129,23 +154,17 @@ impl ProgressReporter {
                 let _ = h.join();
             }
             let count = ps.count.load(Ordering::Relaxed);
-            let total = ps.total;
             drop(guard);
 
-            // Brute-force clear the current line.
+            // Brute-force clear the current line — erase the bar.
             eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
 
-            // Draw final frame with checkmark.
-            if total > 0 {
-                let pct = (count * 100 / total) as usize;
-                let filled = ((count as usize) * BAR_WIDTH / total as usize).min(BAR_WIDTH);
-                let bar: String = std::iter::repeat(BAR_FILL).take(filled)
-                    .chain(std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled))
-                    .collect();
-                eprint!("{CHECKMARK} {past_tense} {bar} {count}/{total} {pct:>3}%");
-            } else {
-                eprint!("{CHECKMARK} {past_tense} {count}");
-            }
+            // Print summary: green ✓ + bold past-tense + count.
+            // Example: "✓ walked 9,744"
+            let check = self.color(ANSI_GREEN, CHECKMARK);
+            let label = self.color(ANSI_BOLD, past_tense);
+            let count_str = format_count(count);
+            eprint!("{check} {label} {count_str}");
 
             // Newline to move to next line.
             eprintln!();
@@ -153,7 +172,7 @@ impl ProgressReporter {
         }
     }
 
-    /// Cancel the current phase — clear the bar without a final frame.
+    /// Cancel the current phase — clear the bar without a summary.
     /// Used for error paths and transitions (e.g. preparing → walk).
     pub fn phase_cancel(&self) {
         let mut guard = self.phase.lock().unwrap();
@@ -172,7 +191,7 @@ impl ProgressReporter {
     /// Draw a single frame (used for initial draw).
     fn draw_frame(&self, label: &str, count: u64, total: u64, spinner_idx: usize) {
         let frame = SPINNER_FRAMES[spinner_idx % SPINNER_FRAMES.len()];
-        draw_frame_raw(frame, label, count, total);
+        draw_frame_raw(frame, label, count, total, self.use_color);
         let _ = std::io::stderr().flush();
     }
 
@@ -209,24 +228,64 @@ impl Drop for ProgressReporter {
     }
 }
 
-/// Draw a single frame to stderr with raw writes.
-/// Uses `\r` to return to column 0, then writes the frame.
-fn draw_frame_raw(spinner: &str, label: &str, count: u64, total: u64) {
+/// Draw a single frame to stderr with raw writes and colors.
+///
+/// Layout for progress bar (known total):
+/// ```text
+/// <cyan spinner> <bold label> <green fill><dim track> <count>/<total> <yellow pct>%
+/// ```
+///
+/// Layout for spinner (unknown total):
+/// ```text
+/// <cyan spinner> <bold label>... <count>
+/// ```
+fn draw_frame_raw(spinner: &str, label: &str, count: u64, total: u64, use_color: bool) {
+    // Clear line first.
+    eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
+
     if total > 0 {
+        // Progress bar phase.
         let pct = if total == 0 { 100 } else { (count * 100 / total) as usize };
         let filled = if total == 0 { BAR_WIDTH } else {
             ((count as usize) * BAR_WIDTH / total as usize).min(BAR_WIDTH)
         };
-        let bar: String = std::iter::repeat(BAR_FILL).take(filled)
-            .chain(std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled))
-            .collect();
-        // Clear line first, then draw.
-        eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
-        eprint!("{spinner} {label:<10} {bar} {count}/{total} {pct:>3}%");
+
+        if use_color {
+            // Colored bar: green fill + dim track.
+            let fill: String = std::iter::repeat(BAR_FILL).take(filled).collect();
+            let track: String = std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled).collect();
+            eprint!(
+                "{ANSI_CYAN}{spinner}{ANSI_RESET} {ANSI_BOLD}{label:<10}{ANSI_RESET} {ANSI_GREEN}{fill}{ANSI_RESET}{ANSI_DIM}{track}{ANSI_RESET} {count}/{total} {ANSI_YELLOW}{pct:>3}%{ANSI_RESET}"
+            );
+        } else {
+            // No color.
+            let bar: String = std::iter::repeat(BAR_FILL).take(filled)
+                .chain(std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled))
+                .collect();
+            eprint!("{spinner} {label:<10} {bar} {count}/{total} {pct:>3}%");
+        }
     } else {
-        eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
-        eprint!("{spinner} {label}... {count}");
+        // Spinner phase.
+        if use_color {
+            eprint!(
+                "{ANSI_CYAN}{spinner}{ANSI_RESET} {ANSI_BOLD}{label}{ANSI_RESET}... {ANSI_WHITE}{count}{ANSI_RESET}"
+            );
+        } else {
+            eprint!("{spinner} {label}... {count}");
+        }
     }
+}
+
+/// Format a number with thousands separator (12345 → "12,345").
+fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().rev().collect();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 { out.insert(0, ','); }
+        out.insert(0, *ch);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -285,5 +344,14 @@ mod tests {
         r.walk_start();
         std::thread::sleep(Duration::from_millis(50));
         r.phase_cancel();
+    }
+
+    #[test]
+    fn format_count_thousands() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(12345), "12,345");
+        assert_eq!(format_count(9744), "9,744");
     }
 }
