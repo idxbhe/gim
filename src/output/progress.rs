@@ -1,190 +1,232 @@
-//! Pretty progress reporting — pip-style thin colored bar + ASCII-safe spinner.
+//! Pretty progress reporting — fully manual, no indicatif.
 //!
-//! Design:
-//! - **pip-style bar**: thin `━` fill, cyan colored, dim track.
-//!   Single line, overwrites with `\r`. Example:
-//!   ```text
-//!   | hashing ━━━━━━━━━━━━━━━━━╌╌╌╌╌╌╌╌╌╌  342/500  67%
-//!   ```
-//! - **ASCII-safe spinner**: `|/-\` rotating. The braille spinner `⠋`
-//!   shows as `[?]` on legacy Windows cmd.exe because the console
-//!   codepage doesn't include U+2800. ASCII spinner works everywhere.
-//! - **Generic phase API**: `phase_start(label, total)`, `phase_tick()`,
-//!   `phase_done(summary)`.
-//! - **Interior mutability**: all methods take `&self` (shared across
-//!   Rayon worker threads). `Mutex<Option<ProgressBar>>` holds the bar.
-//! - **Auto-disable**: when stderr is not a TTY, or `--no-progress` /
-//!   `GIM_NO_PROGRESS` is set, all methods are no-ops.
+//! Why no indicatif? Its `finish*` methods and steady-ticker leave
+//! residue on Windows cmd.exe because the terminal doesn't handle
+//! `\r`-based line overwrite the same way Unix terminals do. By
+//! implementing the progress bar manually with raw stderr writes,
+//! we have full control and can guarantee clean output.
+//!
+//! Two phase types:
+//! - **Spinner** (unknown total): `|/-\` rotating + label + count
+//! - **Progress bar** (known total): `━╌` bar + percentage + count
+//!
+//! When a phase finishes, the final frame shows `✓` + past-tense label
+//! + final count, on its own line.
+//!
+//! Output goes to stderr (so stdout / `--json` is never corrupted).
+//! Auto-disables when stderr is not a TTY or `--no-progress` /
+//! `GIM_NO_PROGRESS` is set.
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::sync::Mutex;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 /// ASCII-only spinner frames. Works on every terminal including
-/// legacy Windows cmd.exe (which renders braille as `[?]`).
+/// legacy Windows cmd.exe (braille `⠋` renders as `[?]` there).
 const SPINNER_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 
-/// pip-style bar characters. `indicatif`'s `progress_chars()` requires
-/// at least 2 characters: the first is the fill, the second is the
-/// track (background). A third (optional) is the "partial" char.
-///
-/// - `━` (U+2501, heavy horizontal) = fill — widely supported
-/// - `╌` (U+254C, light dashed) = track — widely supported
-const BAR_CHARS: &str = "━╌";
+/// Checkmark shown when a phase completes. U+2713 (CHECK MARK).
+const CHECKMARK: &str = "✓";
 
-/// Width of the clear-space used to erase residual bar output on
-/// finish. 120 covers typical terminal widths.
+/// pip-style bar characters.
+const BAR_FILL: char = '━';
+const BAR_TRACK: char = '╌';
+
+/// Width of the progress bar in characters.
+const BAR_WIDTH: usize = 30;
+
+/// Width for brute-force line clear.
 const CLEAR_WIDTH: usize = 120;
+
+/// Internal state for a progress phase.
+struct PhaseState {
+    count: Arc<AtomicU64>,
+    total: u64, // 0 = spinner (unknown total)
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
 
 pub struct ProgressReporter {
     enabled: bool,
-    bar: Mutex<Option<ProgressBar>>,
+    phase: Mutex<Option<PhaseState>>,
 }
 
 impl ProgressReporter {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled, bar: Mutex::new(None) }
+        Self {
+            enabled,
+            phase: Mutex::new(None),
+        }
     }
 
     pub fn enabled(&self) -> bool { self.enabled }
 
     // ── Generic phase API ───────────────────────────────────────────
 
-    /// Start a new phase with a known total. `label` is shown
-    /// left-aligned. If `total` is 0, a spinner (unknown total) is shown.
+    /// Start a new phase. If `total` is 0, a spinner (unknown total)
+    /// is shown; otherwise a progress bar (known total) is shown.
     pub fn phase_start(&self, label: &str, total: usize) {
         if !self.enabled { return; }
-        self.phase_clear();
+        self.phase_cancel(); // clean up any previous phase
 
-        let bar = if total == 0 {
-            let pb = ProgressBar::new_spinner();
-            pb.enable_steady_tick(Duration::from_millis(80));
-            pb.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg} {pos}")
-                    .unwrap()
-                    .tick_strings(SPINNER_FRAMES),
-            );
-            pb.set_message(format!("{label}..."));
-            pb.set_draw_target(ProgressDrawTarget::stderr());
-            pb
-        } else {
-            let pb = ProgressBar::new(total as u64);
-            // Enable steady tick so the {spinner} keeps rotating even
-            // when a single large file takes a long time to process.
-            pb.enable_steady_tick(Duration::from_millis(80));
-            pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.cyan} {msg:.bold} {bar:30.cyan/dim} {pos}/{len} {percent:>3}%",
-                )
-                .unwrap()
-                .tick_strings(SPINNER_FRAMES)
-                .progress_chars(BAR_CHARS),
-            );
-            pb.set_message(label.to_string());
-            pb.set_draw_target(ProgressDrawTarget::stderr());
-            pb
-        };
-        // Force an immediate draw so the bar appears instantly.
-        bar.tick();
-        *self.bar.lock().unwrap() = Some(bar);
+        let count = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let label_owned = label.to_string();
+        let total_u64 = total as u64;
+
+        // Initial draw so the bar appears instantly.
+        self.draw_frame(&label_owned, 0, total_u64, 0);
+
+        let count_clone = count.clone();
+        let stop_clone = stop.clone();
+        let label_for_thread = label_owned;
+
+        let handle = thread::spawn(move || {
+            let mut i = 0usize;
+            loop {
+                thread::sleep(Duration::from_millis(80));
+                if stop_clone.load(Ordering::Relaxed) { break; }
+                let n = count_clone.load(Ordering::Relaxed);
+                let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
+                draw_frame_raw(frame, &label_for_thread, n, total_u64);
+                let _ = std::io::stderr().flush();
+                i += 1;
+            }
+        });
+
+        *self.phase.lock().unwrap() = Some(PhaseState {
+            count,
+            total: total_u64,
+            stop,
+            handle: Some(handle),
+        });
     }
 
     pub fn phase_tick(&self) {
         if !self.enabled { return; }
-        if let Some(ref b) = *self.bar.lock().unwrap() { b.inc(1); }
+        let guard = self.phase.lock().unwrap();
+        if let Some(ref ps) = *guard {
+            ps.count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Finish the current phase. `summary` is printed to stderr after
-    /// the bar is cleared. Pass empty string to skip.
+    /// Finish the current phase with a checkmark.
     ///
-    /// On Windows cmd.exe, `indicatif`'s `finish_and_clear()` may not
-    /// properly erase the bar line. We use a multi-step clear:
-    /// 1. `finish_and_clear()` — indicatif's native clear (ANSI)
-    /// 2. Carriage-return + spaces + carriage-return — brute-force
-    ///    overwrite for terminals that don't honor ANSI clear
-    /// 3. Newline — move to a fresh line for the summary
-    pub fn phase_done(&self, summary: &str) {
+    /// 1. Signal the background thread to stop and join it.
+    /// 2. Brute-force clear the current line.
+    /// 3. Draw the final frame with `✓` + past-tense label + count.
+    /// 4. Print a newline.
+    pub fn phase_done(&self, past_tense: &str) {
         if !self.enabled { return; }
-        let mut guard = self.bar.lock().unwrap();
-        if let Some(b) = guard.take() {
-            // Disable steady tick before clearing so no new frame
-            // draws after we've cleared.
-            b.disable_steady_tick();
-            b.finish_and_clear();
-            drop(guard);
-            // Brute-force clear the line. \r moves to column 0, spaces
-            // overwrite any residual characters, \r moves back to
-            // column 0 so the summary starts at the beginning.
-            eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
-            if !summary.is_empty() {
-                eprintln!("  {summary}");
-            } else {
-                // No summary — still flush the cleared line.
-                eprint!("\r");
+        let mut guard = self.phase.lock().unwrap();
+        if let Some(mut ps) = guard.take() {
+            // Signal thread to stop.
+            ps.stop.store(true, Ordering::Relaxed);
+            // Wait for thread to exit so no more draws happen.
+            if let Some(h) = ps.handle.take() {
+                let _ = h.join();
             }
-            // Flush stderr to ensure the clear is written before any
-            // subsequent stdout output (e.g. from `println!`).
-            use std::io::Write;
+            let count = ps.count.load(Ordering::Relaxed);
+            let total = ps.total;
+            drop(guard);
+
+            // Brute-force clear the current line.
+            eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
+
+            // Draw final frame with checkmark.
+            if total > 0 {
+                let pct = (count * 100 / total) as usize;
+                let filled = ((count as usize) * BAR_WIDTH / total as usize).min(BAR_WIDTH);
+                let bar: String = std::iter::repeat(BAR_FILL).take(filled)
+                    .chain(std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled))
+                    .collect();
+                eprint!("{CHECKMARK} {past_tense} {bar} {count}/{total} {pct:>3}%");
+            } else {
+                eprint!("{CHECKMARK} {past_tense} {count}");
+            }
+
+            // Newline to move to next line.
+            eprintln!();
             let _ = std::io::stderr().flush();
         }
     }
 
-    fn phase_clear(&self) {
-        if let Some(b) = self.bar.lock().unwrap().take() {
-            b.disable_steady_tick();
-            b.finish_and_clear();
+    /// Cancel the current phase — clear the bar without a final frame.
+    /// Used for error paths and transitions (e.g. preparing → walk).
+    pub fn phase_cancel(&self) {
+        let mut guard = self.phase.lock().unwrap();
+        if let Some(mut ps) = guard.take() {
+            ps.stop.store(true, Ordering::Relaxed);
+            if let Some(h) = ps.handle.take() {
+                let _ = h.join();
+            }
+            drop(guard);
+            // Brute-force clear — NO newline, stay on same line.
             eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
+            let _ = std::io::stderr().flush();
         }
+    }
+
+    /// Draw a single frame (used for initial draw).
+    fn draw_frame(&self, label: &str, count: u64, total: u64, spinner_idx: usize) {
+        let frame = SPINNER_FRAMES[spinner_idx % SPINNER_FRAMES.len()];
+        draw_frame_raw(frame, label, count, total);
+        let _ = std::io::stderr().flush();
     }
 
     // ── Convenience wrappers ────────────────────────────────────────
 
     pub fn walk_start(&self) { self.phase_start("walking", 0); }
     pub fn walk_tick(&self) { self.phase_tick(); }
-    pub fn walk_done(&self, count: u64) {
-        self.phase_done(&format!("walked {} files", format_count(count)));
-    }
+    pub fn walk_done(&self, _count: u64) { self.phase_done("walked"); }
 
     pub fn hash_start(&self, total: usize) { self.phase_start("hashing", total); }
     pub fn hash_tick(&self) { self.phase_tick(); }
-    pub fn hash_done(&self, count: u64) {
-        self.phase_done(&format!("hashed {} files", format_count(count)));
-    }
+    pub fn hash_done(&self, _count: u64) { self.phase_done("hashed"); }
 
     pub fn copy_start(&self, total: usize) { self.phase_start("copying", total); }
     pub fn copy_tick(&self) { self.phase_tick(); }
-    pub fn copy_done(&self, count: u64) {
-        self.phase_done(&format!("copied {} files", format_count(count)));
-    }
+    pub fn copy_done(&self, _count: u64) { self.phase_done("copied"); }
 
     pub fn store_start(&self, total: usize) { self.phase_start("storing", total); }
     pub fn store_tick(&self) { self.phase_tick(); }
-    pub fn store_done(&self, count: u64) {
-        self.phase_done(&format!("stored {} objects", format_count(count)));
-    }
+    pub fn store_done(&self, _count: u64) { self.phase_done("stored"); }
 
     pub fn scan_start(&self) { self.phase_start("scanning", 0); }
     pub fn scan_tick(&self) { self.phase_tick(); }
-    pub fn scan_done(&self, count: u64) {
-        self.phase_done(&format!("scanned {} objects", format_count(count)));
-    }
+    pub fn scan_done(&self, _count: u64) { self.phase_done("scanned"); }
 
     pub fn delete_start(&self, total: usize) { self.phase_start("deleting", total); }
     pub fn delete_tick(&self) { self.phase_tick(); }
-    pub fn delete_done(&self, count: u64) {
-        self.phase_done(&format!("deleted {} objects", format_count(count)));
+    pub fn delete_done(&self, _count: u64) { self.phase_done("deleted"); }
+}
+
+impl Drop for ProgressReporter {
+    fn drop(&mut self) {
+        self.phase_cancel();
     }
 }
 
-fn format_count(n: u64) -> String {
-    let s = n.to_string();
-    let chars: Vec<char> = s.chars().rev().collect();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in chars.iter().enumerate() {
-        if i > 0 && i % 3 == 0 { out.insert(0, ','); }
-        out.insert(0, *ch);
+/// Draw a single frame to stderr with raw writes.
+/// Uses `\r` to return to column 0, then writes the frame.
+fn draw_frame_raw(spinner: &str, label: &str, count: u64, total: u64) {
+    if total > 0 {
+        let pct = if total == 0 { 100 } else { (count * 100 / total) as usize };
+        let filled = if total == 0 { BAR_WIDTH } else {
+            ((count as usize) * BAR_WIDTH / total as usize).min(BAR_WIDTH)
+        };
+        let bar: String = std::iter::repeat(BAR_FILL).take(filled)
+            .chain(std::iter::repeat(BAR_TRACK).take(BAR_WIDTH - filled))
+            .collect();
+        // Clear line first, then draw.
+        eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
+        eprint!("{spinner} {label:<10} {bar} {count}/{total} {pct:>3}%");
+    } else {
+        eprint!("\r{}\r", " ".repeat(CLEAR_WIDTH));
+        eprint!("{spinner} {label}... {count}");
     }
-    out
 }
 
 #[cfg(test)]
@@ -203,14 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn format_count_thousands() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(12345), "12,345");
-    }
-
-    #[test]
     fn spinner_frames_are_ascii() {
         for frame in SPINNER_FRAMES {
             assert!(frame.is_ascii(), "spinner frame \"{frame}\" contains non-ASCII");
@@ -218,17 +252,38 @@ mod tests {
     }
 
     #[test]
-    fn bar_chars_has_at_least_two() {
-        let count = BAR_CHARS.chars().count();
-        assert!(count >= 2, "BAR_CHARS must have at least 2 chars, got {count}: {BAR_CHARS:?}");
-    }
-
-    #[test]
-    fn enabled_reporter_does_not_panic() {
+    fn enabled_bar_starts_and_finishes() {
         let r = ProgressReporter::new(true);
         r.hash_start(100);
         r.hash_tick();
         r.hash_tick();
         r.hash_done(2);
+    }
+
+    #[test]
+    fn enabled_spinner_starts_and_finishes() {
+        let r = ProgressReporter::new(true);
+        r.walk_start();
+        std::thread::sleep(Duration::from_millis(200));
+        r.walk_tick();
+        r.walk_done(2);
+    }
+
+    #[test]
+    fn phase_transitions_work() {
+        let r = ProgressReporter::new(true);
+        r.walk_start();
+        std::thread::sleep(Duration::from_millis(50));
+        r.hash_start(100);
+        r.hash_tick();
+        r.hash_done(1);
+    }
+
+    #[test]
+    fn phase_cancel_works() {
+        let r = ProgressReporter::new(true);
+        r.walk_start();
+        std::thread::sleep(Duration::from_millis(50));
+        r.phase_cancel();
     }
 }

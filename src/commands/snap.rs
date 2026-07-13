@@ -20,8 +20,8 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     paths.ensure_data_dir()?;
     let gdb = GamesDb::open(&paths.games_db)?;
     let game = gdb.get(&alias)?.ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
-    if !game.game_dir.exists() { progress.phase_done(""); return Err(GError::GameDirMissing(game.game_dir.clone())); }
-    if !game.game_dir.is_dir() { progress.phase_done(""); return Err(GError::GameDirNotDir(game.game_dir.clone())); }
+    if !game.game_dir.exists() { progress.phase_cancel(); return Err(GError::GameDirMissing(game.game_dir.clone())); }
+    if !game.game_dir.is_dir() { progress.phase_cancel(); return Err(GError::GameDirNotDir(game.game_dir.clone())); }
     let sdb_path = paths.snaps_db(&alias);
     let mut sdb = SnapsDb::open(&sdb_path)?;
     let _lock = locking::acquire_game_lock(&alias, &sdb_path)?;
@@ -31,7 +31,7 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let cbn = cur.as_ref().map(|b| b.name.clone());
 
     let sid = match custom_id {
-        Some(id) => { validate_id(&id)?; if sdb.get_snapshot(&id)?.is_some() { progress.phase_done(""); return Err(GError::SnapshotIdExists(id, alias.clone())); } id }
+        Some(id) => { validate_id(&id)?; if sdb.get_snapshot(&id)?.is_some() { progress.phase_cancel(); return Err(GError::SnapshotIdExists(id, alias.clone())); } id }
         None => match &pid {
             None => "original".to_string(),
             Some(_) => { let base = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string(); let mut cand = base.clone(); let mut s = 2u32; while sdb.get_snapshot(&cand)?.is_some() { cand = format!("{base}-{s}"); s += 1; } cand }
@@ -41,8 +41,8 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
     let pf = match &pid { Some(p) => sdb.files_for_snapshot(p)?, None => HashMap::new() };
 
-    // Preparing done — clear the spinner before walk phase starts.
-    progress.phase_done("");
+    // Preparing done — cancel the spinner before walk phase starts.
+    progress.phase_cancel();
 
     let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash, ..WalkOptions::default() };
     let ref_map = if full_hash { None } else { Some(&pf) };
@@ -67,7 +67,7 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
             Ok(()) => { written.push((f.hash.clone(), f.file_size)); progress.store_tick(); }
             Err(e) => {
                 for (h, _) in &written { let _ = cas.delete(h.as_str()); }
-                progress.phase_done("");
+                progress.phase_cancel();
                 return Err(e);
             }
         }

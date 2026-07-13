@@ -26,7 +26,7 @@ pub fn run(c: &Colorizer, alias: String, threads: Option<usize>, json: bool, ful
     let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
 
     if !json {
-        progress.phase_done("");
+        progress.phase_cancel();
     }
 
     let wo = WalkOptions { threads: threads.unwrap_or(0), full_hash, ..WalkOptions::default() };
