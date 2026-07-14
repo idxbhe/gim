@@ -84,7 +84,7 @@ fn switch_b(sdb: &mut SnapsDb, paths: &Paths, c: &Colorizer, alias: &str, gd: &P
             let cfg = GimConfig::load_game(paths, alias)?;
             let algorithm = cfg.hash_algorithm()?;
             let wo = WalkOptions { algorithm, parallel: cfg.hash_parallel(), ..WalkOptions::default() };
-            let (hashed, _) = walk_and_hash(gd, &ig, Some(&pf), &wo, progress)?;
+            let (hashed, _) = walk_and_hash(gd, &ig, Some(&pf), &wo, progress, None)?;
             let mut cm = HashMap::with_capacity(hashed.len());
             for f in hashed { cm.insert(f.file_path, crate::db::FileMeta { hash: f.hash, file_size: f.file_size, modified_time: f.modified_time }); }
             if diff_states(&pf, &cm).total_changes() > 0 { return Err(GError::UncommittedChanges); }

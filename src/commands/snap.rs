@@ -6,13 +6,21 @@ use crate::locking;
 use crate::output::{Colorizer, ProgressReporter};
 use crate::output::format_size;
 use crate::storage::Cas;
-use crate::walker::{walk_and_hash, WalkOptions};
+use crate::walker::{walk_and_hash, SnapFilter, WalkOptions};
 use std::collections::HashMap;
 
-pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<String>, threads: Option<usize>, dry_run: bool, full_hash: bool, progress: &ProgressReporter) -> GResult<()> {
-    // ── Show a spinner IMMEDIATELY so the user sees feedback the
-    //    moment they press Enter. The DB/lock setup below takes a few
-    //    hundred ms, and without this the terminal looks frozen.
+pub fn run(
+    c: &Colorizer,
+    alias: String,
+    custom_id: Option<String>,
+    msg: Option<String>,
+    threads: Option<usize>,
+    dry_run: bool,
+    full_hash: bool,
+    exclude_patterns: Vec<String>,
+    include_only_patterns: Vec<String>,
+    progress: &ProgressReporter,
+) -> GResult<()> {
     progress.phase_start("preparing", 0);
 
     let mut paths = Paths::from_env()?;
@@ -41,10 +49,12 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let ig = ignore_mod::build_for_game(&paths, &alias, &game.game_dir)?;
     let pf = match &pid { Some(p) => sdb.files_for_snapshot(p)?, None => HashMap::new() };
 
-    // Preparing done — cancel the spinner before walk phase starts.
     progress.phase_cancel();
 
-    // Load per-game config to determine hash algorithm.
+    // Build per-snap filter from --exclude and --include-only patterns.
+    let snap_filter = SnapFilter::new(&exclude_patterns, &include_only_patterns)?;
+    let has_filter = !snap_filter.is_empty();
+
     let cfg = GimConfig::load_game(&paths, &alias)?;
     let algorithm = cfg.hash_algorithm()?;
     let cfg_threads = cfg.hash_threads();
@@ -57,20 +67,70 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
         ..WalkOptions::default()
     };
     let ref_map = if full_hash { None } else { Some(&pf) };
-    let (hashed, locked) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress)?;
+    // Walk only files that pass the snap filter. Files filtered out
+    // will be inherited from the parent snapshot as "unchanged".
+    let (hashed, locked) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress, if has_filter { Some(&snap_filter) } else { None })?;
 
+    // Build current_state from walked files only.
     let mut cs = HashMap::with_capacity(hashed.len());
-    for f in &hashed { cs.insert(f.file_path.clone(), FileMeta { hash: f.hash.clone(), file_size: f.file_size, modified_time: f.modified_time }); }
-    let diff = diff_states(&pf, &cs);
+    for f in &hashed {
+        cs.insert(f.file_path.clone(), FileMeta {
+            hash: f.hash.clone(), file_size: f.file_size, modified_time: f.modified_time,
+        });
+    }
 
-    if dry_run { print_dry(&alias, &sid, &diff, &locked, c, full_hash); return Ok(()); }
-    if diff.total_changes() == 0 { println!("no changes detected, snapshot skipped"); return Ok(()); }
+    // ── Inheritance logic ───────────────────────────────────────────
+    // If a snap filter is active, files that were filtered out (not
+    // walked) must be inherited from the parent snapshot as "unchanged".
+    // Without this, the diff would mark them as "deleted" — which is
+    // wrong. The user didn't delete them; they just excluded them from
+    // this snap's walk.
+    //
+    // For each file in the parent snapshot:
+    // - If it was walked (in cs) → use the walked hash (normal diff)
+    // - If it was NOT walked AND was filtered out by snap_filter →
+    //   inherit from parent as unchanged
+    // - If it was NOT walked AND was NOT filtered out → it was truly
+    //   deleted from disk → mark as deleted
+    let diff = if has_filter {
+        // Build the complete current state: walked files + inherited files.
+        let mut full_cs = HashMap::with_capacity(cs.len() + pf.len());
+        // Add walked files.
+        for (path, meta) in &cs {
+            full_cs.insert(path.clone(), meta.clone());
+        }
+        // Inherit non-walked parent files that were filtered out.
+        for (path, meta) in &pf {
+            if !full_cs.contains_key(path) {
+                // This parent file was not walked. Was it filtered out
+                // by the snap filter, or was it truly deleted?
+                if !snap_filter.should_walk(path) {
+                    // Filtered out — inherit from parent as unchanged.
+                    full_cs.insert(path.clone(), meta.clone());
+                }
+                // If should_walk(path) is true but the file wasn't walked,
+                // it means the file doesn't exist on disk → truly deleted.
+                // Don't add it to full_cs → diff will detect it as deleted.
+            }
+        }
+        diff_states(&pf, &full_cs)
+    } else {
+        // No filter — normal diff.
+        diff_states(&pf, &cs)
+    };
+
+    if dry_run { print_dry(&alias, &sid, &diff, &locked, c, full_hash, has_filter); return Ok(()); }
+    if diff.total_changes() == 0 {
+        println!("no changes detected, snapshot skipped");
+        return Ok(());
+    }
 
     let cas = Cas::new(paths.objects_dir(&alias));
     cas.ensure()?;
     let mut written = Vec::new();
-    // Filter to files that need CAS storage: new or modified, and not
-    // already in CAS (deduplication).
+
+    // Only store NEW or MODIFIED objects to CAS.
+    // Inherited files don't need storage — their objects already exist.
     let to_store: Vec<&crate::walker::HashedFile> = hashed
         .iter()
         .filter(|f| match pf.get(&f.file_path) {
@@ -94,11 +154,40 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let store_count = written.len() as u64;
     progress.store_done(store_count);
 
+    // ── Build the complete file list for the snapshot ──────────────
+    // The snapshot must contain ALL files: walked + inherited.
+    // This ensures `gim restore` can restore the complete game state.
     let txr: GResult<()> = {
         let tx = sdb.transaction()?;
-        SnapsDb::insert_snap(&tx, &sid, pid.as_deref(), SnapsDb::now_ms(), msg.as_deref(), cs.len() as i64, diff.added_size())?;
-        let all: Vec<FileEntry> = hashed.iter().map(|f| FileEntry { file_path: f.file_path.clone(), hash: f.hash.clone(), file_size: f.file_size, modified_time: f.modified_time }).collect();
-        SnapsDb::insert_files(&tx, &sid, &all)?;
+        // Build the full file list.
+        let mut all_files: Vec<FileEntry> = if has_filter {
+            // Walked files + inherited parent files.
+            let mut out: Vec<FileEntry> = hashed.iter().map(|f| FileEntry {
+                file_path: f.file_path.clone(), hash: f.hash.clone(),
+                file_size: f.file_size, modified_time: f.modified_time,
+            }).collect();
+            // Add inherited files (parent files not walked, filtered out).
+            for (path, meta) in &pf {
+                if !cs.contains_key(path) && !snap_filter.should_walk(path) {
+                    out.push(FileEntry {
+                        file_path: path.clone(), hash: meta.hash.clone(),
+                        file_size: meta.file_size, modified_time: meta.modified_time,
+                    });
+                }
+            }
+            out
+        } else {
+            hashed.iter().map(|f| FileEntry {
+                file_path: f.file_path.clone(), hash: f.hash.clone(),
+                file_size: f.file_size, modified_time: f.modified_time,
+            }).collect()
+        };
+
+        // Sort for deterministic storage order.
+        all_files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+        SnapsDb::insert_snap(&tx, &sid, pid.as_deref(), SnapsDb::now_ms(), msg.as_deref(), all_files.len() as i64, diff.added_size())?;
+        SnapsDb::insert_files(&tx, &sid, &all_files)?;
         SnapsDb::insert_deleted_files(&tx, &sid, &diff.deleted)?;
         match &cbn {
             Some(n) => { tx.execute("UPDATE branches SET snapshotId = ?1 WHERE name = ?2", rusqlite::params![sid, n])?; }
@@ -109,15 +198,26 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     if let Err(e) = txr { for (h, _) in &written { let _ = cas.delete(h.as_str()); } return Err(e); }
 
     let bl = cbn.as_deref().unwrap_or("main");
+    let total_files = if has_filter {
+        // Count walked + inherited.
+        cs.len() + pf.iter().filter(|(p, _)| !cs.contains_key(*p) && !snap_filter.should_walk(p)).count()
+    } else {
+        cs.len()
+    };
     println!("snapshotted {} as {}", c.green(&alias), c.bold(&sid));
-    println!("  {} files tracked, {} new/modified, {} deleted, added {}  (branch: {})", cs.len(), diff.added.len() + diff.modified.len(), diff.deleted.len(), format_size(diff.added_size()), c.cyan(bl));
+    println!("  {} files tracked, {} new/modified, {} deleted, added {}  (branch: {})", total_files, diff.added.len() + diff.modified.len(), diff.deleted.len(), format_size(diff.added_size()), c.cyan(bl));
+    if has_filter {
+        let inherited = total_files - cs.len();
+        println!("  {} files inherited (filtered from this snap)", c.dim(&inherited.to_string()));
+    }
     if !locked.is_empty() { println!("\nwarning: {} file(s) could not be read:", locked.len()); for lf in &locked { println!("  {}", lf.file_path); } }
     Ok(())
 }
 
-fn print_dry(alias: &str, id: &str, diff: &crate::db::Diff, locked: &[crate::walker::LockedFile], c: &Colorizer, fh: bool) {
+fn print_dry(alias: &str, id: &str, diff: &crate::db::Diff, locked: &[crate::walker::LockedFile], c: &Colorizer, fh: bool, has_filter: bool) {
     println!("dry run: would snapshot {alias} as {}", c.bold(id));
     if fh { println!("  (full-hash mode)"); }
+    if has_filter { println!("  (per-snap filter active)"); }
     println!("\n  added ({}):", diff.added.len());
     for f in &diff.added { println!("    + {} ({})", c.green(&f.file_path), format_size(f.file_size)); }
     println!("  modified ({}):", diff.modified.len());

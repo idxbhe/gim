@@ -17,7 +17,23 @@ pub enum Command {
     Add { alias: String, game_dir: PathBuf, #[arg(long)] title: Option<String>, #[arg(long = "dataDir")] data_dir: Option<PathBuf> },
     Remove { alias: String, #[arg(long)] confirm: bool },
     List { #[arg(long)] details: bool, #[arg(long)] json: bool },
-    Snap { alias: String, #[arg(long = "id")] id: Option<String>, #[arg(long = "msg", short = 'm')] msg: Option<String>, #[arg(long = "threads", short = 't')] threads: Option<usize>, #[arg(long = "dry-run")] dry_run: bool, #[arg(long = "full-hash")] full_hash: bool },
+    Snap {
+        alias: String,
+        #[arg(long = "id")] id: Option<String>,
+        #[arg(long = "msg", short = 'm')] msg: Option<String>,
+        #[arg(long = "threads", short = 't')] threads: Option<usize>,
+        #[arg(long = "dry-run")] dry_run: bool,
+        #[arg(long = "full-hash")] full_hash: bool,
+        /// Exclude files from this snap only (not permanent).
+        /// Patterns use gitignore syntax. Can be repeated.
+        #[arg(long = "exclude")]
+        exclude: Option<Vec<String>>,
+        /// Only include files matching these patterns in this snap.
+        /// Other files are inherited from parent as unchanged.
+        /// Patterns use gitignore syntax. Can be repeated.
+        #[arg(long = "include-only")]
+        include_only: Option<Vec<String>>,
+    },
     Restore { alias: String, snapshot_id: String, #[arg(long = "full")] full: bool, #[arg(long = "threads", short = 't')] threads: Option<usize>, #[arg(long = "dry-run")] dry_run: bool },
     Status { alias: String, #[arg(long = "threads", short = 't')] threads: Option<usize>, #[arg(long)] json: bool, #[arg(long = "full-hash")] full_hash: bool },
     Log { alias: String, #[arg(long)] oneline: bool, #[arg(long)] json: bool, #[arg(short = 'n')] n: Option<usize> },

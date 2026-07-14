@@ -44,7 +44,7 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Add { alias, game_dir, title, data_dir } => add::run(c, alias.clone(), game_dir.clone(), title.clone(), data_dir.clone()),
         Command::Remove { alias, confirm } => remove::run(c, alias.clone(), *confirm),
         Command::List { details, json } => list::run(c, *details, *json),
-        Command::Snap { alias, id, msg, threads, dry_run, full_hash } => snap::run(c, alias.clone(), id.clone(), msg.clone(), *threads, *dry_run, *full_hash, p),
+        Command::Snap { alias, id, msg, threads, dry_run, full_hash, exclude, include_only } => snap::run(c, alias.clone(), id.clone(), msg.clone(), *threads, *dry_run, *full_hash, exclude.clone().unwrap_or_default(), include_only.clone().unwrap_or_default(), p),
         Command::Restore { alias, snapshot_id, full, threads, dry_run } => restore::run(c, alias.clone(), snapshot_id.clone(), *full, *threads, *dry_run, p),
         Command::Status { alias, threads, json, full_hash } => status::run(c, alias.clone(), *threads, *json, *full_hash, p),
         Command::Log { alias, oneline, json, n } => log_cmd::run(c, alias.clone(), *oneline, *json, *n),

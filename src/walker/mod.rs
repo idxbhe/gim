@@ -1,16 +1,22 @@
 //! Parallel file walker + hasher with mtime+size pre-filter + progress.
+//!
+//! Supports per-snap filtering via `SnapFilter` (`--exclude` / `--include-only`).
+//! Files filtered out by SnapFilter are NOT walked — the snap command
+//! inherits them from the parent snapshot as "unchanged".
 
 use crate::db::FileMeta;
-use crate::error::GResult;
+use crate::error::{GError, GResult};
 use crate::hashing::{hash_file_with_retry, Hash, HashAlgorithm};
 use crate::ignore_mod::IgnoreSet;
 use crate::output::ProgressReporter;
 use crate::parallel;
 use crate::path_utils;
 use crossbeam_channel::bounded;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -25,20 +31,68 @@ pub struct WalkOptions {
     pub retry_delay: Duration,
     pub full_hash: bool,
     pub algorithm: HashAlgorithm,
-    /// If false, hash files sequentially (better for HDDs).
     pub parallel: bool,
 }
 impl Default for WalkOptions {
     fn default() -> Self {
         Self {
-            threads: 0,
-            max_retries: 3,
-            retry_delay: Duration::from_millis(500),
-            full_hash: false,
-            algorithm: HashAlgorithm::Xxhash,
-            parallel: true,
+            threads: 0, max_retries: 3, retry_delay: Duration::from_millis(500),
+            full_hash: false, algorithm: HashAlgorithm::Xxhash, parallel: true,
         }
     }
+}
+
+/// Per-snap filter for `--exclude` and `--include-only` flags.
+///
+/// Uses gitignore-style pattern matching (same syntax as `.gignore`).
+/// Applied AFTER the permanent `.gignore` filter.
+///
+/// Files skipped by this filter are NOT lost — the snap command
+/// inherits them from the parent snapshot as "unchanged".
+pub struct SnapFilter {
+    exclude: Option<Gitignore>,
+    include_only: Option<Gitignore>,
+}
+
+impl SnapFilter {
+    pub fn new(exclude_patterns: &[String], include_only_patterns: &[String]) -> GResult<Self> {
+        let exclude = if exclude_patterns.is_empty() { None } else { Some(build_gitignore(exclude_patterns)?) };
+        let include_only = if include_only_patterns.is_empty() { None } else { Some(build_gitignore(include_only_patterns)?) };
+        Ok(Self { exclude, include_only })
+    }
+
+    pub fn is_empty(&self) -> bool { self.exclude.is_none() && self.include_only.is_none() }
+
+    /// Should this file path be walked? Returns false if excluded or
+    /// not matching include_only.
+    pub fn should_walk(&self, path: &str) -> bool {
+        if let Some(ref ex) = self.exclude {
+            if matches!(ex.matched(Path::new(path), false), ignore::Match::Ignore(_)) { return false; }
+        }
+        if let Some(ref inc) = self.include_only {
+            if !matches!(inc.matched(Path::new(path), false), ignore::Match::Ignore(_)) { return false; }
+        }
+        true
+    }
+
+    /// Should this directory be pruned (entire subtree skipped)?
+    /// Only prunes on `--exclude` directory matches. For `--include_only`,
+    /// we don't prune (a subdir might contain matching files).
+    pub fn should_skip_dir(&self, dir: &str) -> bool {
+        if let Some(ref ex) = self.exclude {
+            if matches!(ex.matched(Path::new(dir), true), ignore::Match::Ignore(_)) { return true; }
+        }
+        false
+    }
+}
+
+/// Build a Gitignore matcher from pattern strings.
+fn build_gitignore(patterns: &[String]) -> GResult<Gitignore> {
+    let mut builder = GitignoreBuilder::new("");
+    for p in patterns {
+        builder.add_line(None, p).map_err(|e| GError::Other(format!("invalid pattern \"{p}\": {e}")))?;
+    }
+    builder.build().map_err(|e| GError::Other(format!("gitignore build: {e}")))
 }
 
 /// Walk + hash with progress reporting.
@@ -48,38 +102,28 @@ pub fn walk_and_hash(
     reference: Option<&HashMap<String, FileMeta>>,
     opts: &WalkOptions,
     progress: &ProgressReporter,
+    snap_filter: Option<&SnapFilter>,
 ) -> GResult<(Vec<HashedFile>, Vec<LockedFile>)> {
     let use_smart = !opts.full_hash && reference.is_some();
-    let reference = std::sync::Arc::new(reference.cloned().unwrap_or_default());
+    let reference = Arc::new(reference.cloned().unwrap_or_default());
 
-    // ── Walk phase (parallel, spinner) ──────────────────────────────
     progress.walk_start();
-    let candidates = collect_candidates_parallel(game_dir, ignore_set, progress)?;
+    let candidates = collect_candidates_parallel(game_dir, ignore_set, progress, snap_filter)?;
     let walk_count = candidates.len() as u64;
     progress.walk_done(walk_count);
 
-    // ── Hash phase ──────────────────────────────────────────────────
-    // Use parallel Rayon iter if hash.parallel=true (default, good for
-    // SSDs). Use sequential iter if false (better for HDDs — avoids
-    // disk thrashing from random parallel reads).
     progress.hash_start(candidates.len());
     let results: Vec<HashResult> = if opts.parallel {
         let pool = parallel::global();
         pool.install(|| {
-            candidates
-                .par_iter()
-                .map(|(path, normalized, size, mtime)| {
-                    hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
-                })
-                .collect()
+            candidates.par_iter().map(|(path, normalized, size, mtime)| {
+                hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
+            }).collect()
         })
     } else {
-        candidates
-            .iter()
-            .map(|(path, normalized, size, mtime)| {
-                hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
-            })
-            .collect()
+        candidates.iter().map(|(path, normalized, size, mtime)| {
+            hash_one(path, normalized, *size, *mtime, &reference, opts, use_smart, progress)
+        }).collect()
     };
     let hash_count = results.len() as u64;
     progress.hash_done(hash_count);
@@ -88,8 +132,10 @@ pub fn walk_and_hash(
     let mut locked = Vec::new();
     for r in results {
         match r {
-            HashResult::Ok { file_path, hash, file_size, modified_time } => files.push(HashedFile { file_path, hash, file_size, modified_time }),
-            HashResult::Locked { file_path, error } => locked.push(LockedFile { file_path, error }),
+            HashResult::Ok { file_path, hash, file_size, modified_time } =>
+                files.push(HashedFile { file_path, hash, file_size, modified_time }),
+            HashResult::Locked { file_path, error } =>
+                locked.push(LockedFile { file_path, error }),
         }
     }
     Ok((files, locked))
@@ -100,17 +146,10 @@ enum HashResult {
     Locked { file_path: String, error: String },
 }
 
-/// Hash a single file. Extracted so both parallel and sequential
-/// paths use identical logic.
 fn hash_one(
-    path: &Path,
-    normalized: &str,
-    size: i64,
-    mtime: i64,
-    reference: &HashMap<String, FileMeta>,
-    opts: &WalkOptions,
-    use_smart: bool,
-    progress: &ProgressReporter,
+    path: &Path, normalized: &str, size: i64, mtime: i64,
+    reference: &HashMap<String, FileMeta>, opts: &WalkOptions,
+    use_smart: bool, progress: &ProgressReporter,
 ) -> HashResult {
     let need_hash = if use_smart {
         match reference.get(normalized) {
@@ -136,7 +175,7 @@ fn hash_one(
 /// Walk-only (no hashing). Used by `gim restore --full`.
 pub fn walk_only(game_dir: &Path, ignore_set: &IgnoreSet, progress: &ProgressReporter) -> GResult<Vec<String>> {
     progress.walk_start();
-    let candidates = collect_candidates_parallel(game_dir, ignore_set, progress)?;
+    let candidates = collect_candidates_parallel(game_dir, ignore_set, progress, None)?;
     let count = candidates.len() as u64;
     progress.walk_done(count);
     Ok(candidates.into_iter().map(|(_, n, _, _)| n).collect())
@@ -146,7 +185,14 @@ fn collect_candidates_parallel(
     game_dir: &Path,
     ignore_set: &IgnoreSet,
     progress: &ProgressReporter,
+    snap_filter: Option<&SnapFilter>,
 ) -> GResult<Vec<(PathBuf, String, i64, i64)>> {
+    // We filter AFTER collecting candidates. This is simpler and avoids
+    // the Gitignore clone problem (Gitignore doesn't implement Clone,
+    // and WalkParallel needs 'static closures). The stat overhead for
+    // filtered files is negligible compared to hashing.
+    // hashing. And it avoids the Gitignore clone problem entirely.
+
     let mut builder = ignore::WalkBuilder::new(game_dir);
     builder.hidden(false).parents(false).ignore(false).git_ignore(false).git_global(false).git_exclude(false).follow_links(false)
         .threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
@@ -155,6 +201,7 @@ fn collect_candidates_parallel(
     let game_dir2 = game_dir.to_path_buf();
     let ignore_set2 = ignore_set.clone();
     let walker = builder.build_parallel();
+
     let wt = std::thread::spawn(move || -> GResult<()> {
         walker.run(|| {
             let tx = tx.clone();
@@ -175,14 +222,6 @@ fn collect_candidates_parallel(
                 }
 
                 if ft.is_file() {
-                    // Check if the file itself is ignored.
-                    // Note: we don't need to check ancestors here because
-                    // when we encounter an ignored directory above, we
-                    // return WalkState::Skip which prunes the entire
-                    // subtree — so files inside ignored directories are
-                    // never visited. This avoids the expensive per-file
-                    // ancestor loop that allocated a new String per
-                    // ancestor per file.
                     if ig.is_ignored(&norm, false) {
                         return ignore::WalkState::Continue;
                     }
@@ -199,6 +238,14 @@ fn collect_candidates_parallel(
 
     let mut out = Vec::new();
     while let Ok(item) = rx.recv() {
+        // Apply snap_filter AFTER collection. This is simpler and
+        // avoids the Gitignore clone problem. The stat overhead for
+        // filtered files is negligible compared to hashing.
+        if let Some(ref filter) = snap_filter {
+            if !filter.should_walk(&item.1) {
+                continue;
+            }
+        }
         out.push(item);
         progress.walk_tick();
     }

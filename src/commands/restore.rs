@@ -36,7 +36,7 @@ pub fn run(c: &Colorizer, alias: String, sid: String, full: bool, threads: Optio
         let algorithm = cfg.hash_algorithm()?;
         let cfg_threads = cfg.hash_threads();
         let wo = WalkOptions { threads: threads.unwrap_or(cfg_threads), full_hash: false, algorithm, parallel: cfg.hash_parallel(), ..WalkOptions::default() };
-        let (hashed, _) = walk_and_hash(&game.game_dir, &ig, Some(&tm), &wo, progress)?;
+        let (hashed, _) = walk_and_hash(&game.game_dir, &ig, Some(&tm), &wo, progress, None)?;
         hashed.into_iter().map(|f| (f.file_path, crate::db::FileMeta { hash: f.hash, file_size: f.file_size, modified_time: f.modified_time })).collect()
     };
 

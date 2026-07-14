@@ -40,7 +40,7 @@ pub fn run(c: &Colorizer, alias: String, threads: Option<usize>, json: bool, ful
         ..WalkOptions::default()
     };
     let ref_map = if full_hash { None } else { Some(&pf) };
-    let (hashed, _) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress)?;
+    let (hashed, _) = walk_and_hash(&game.game_dir, &ig, ref_map, &wo, progress, None)?;
     let mut cm = std::collections::HashMap::with_capacity(hashed.len());
     for f in hashed { cm.insert(f.file_path, crate::db::FileMeta { hash: f.hash, file_size: f.file_size, modified_time: f.modified_time }); }
     let diff = diff_states(&pf, &cm);
