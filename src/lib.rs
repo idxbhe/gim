@@ -9,5 +9,6 @@ pub mod locking;
 pub mod output;
 pub mod parallel;
 pub mod path_utils;
+pub mod repack;
 pub mod storage;
 pub mod walker;

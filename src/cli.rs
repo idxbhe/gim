@@ -50,4 +50,75 @@ pub enum Command {
     },
     /// Migrate database schema to latest version.
     Migrate { alias: Option<String> },
+    /// Repack game snapshots into a compressed, portable archive.
+    /// Uses xtool for precompression. Output goes to
+    /// [bin_dir]/repacked/[game_title]/.
+    Repack {
+        alias: String,
+        /// Compression profile: fast, balanced, max.
+        #[arg(long, default_value = "balanced")]
+        profile: String,
+        /// Compression level 1-10 (overrides profile default).
+        #[arg(long)]
+        level: Option<u32>,
+        /// Only repack this specific snapshot (no history).
+        /// Can be repeated for multiple snapshots.
+        #[arg(long = "snapshot")]
+        snapshots: Option<Vec<String>>,
+        /// Number of threads (default: total - 1).
+        #[arg(long, short = 't')]
+        threads: Option<usize>,
+        /// Memory limit in MB (default: 80% of RAM).
+        #[arg(long)]
+        memory: Option<u64>,
+        /// Output directory (default: [bin_dir]/repacked/[game_title]).
+        #[arg(long = "output", short = 'o')]
+        output: Option<PathBuf>,
+        /// Dry run — show what would be packed.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Unpack a .gim archive to a directory.
+    Unpack {
+        /// Path to the .gim manifest file.
+        gim_file: PathBuf,
+        /// Output directory.
+        output_dir: PathBuf,
+        /// Unpack a specific snapshot (default: HEAD/latest).
+        #[arg(long = "snapshot")]
+        snapshot: Option<String>,
+        /// Also restore game tracking (add to gim registry).
+        #[arg(long = "track")]
+        track: bool,
+        /// Number of threads (default: total - 1).
+        #[arg(long, short = 't')]
+        threads: Option<usize>,
+        /// Dry run — show what would be unpacked.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+    /// Install a .gim archive — unpack + register game + create shortcut.
+    /// Same as unpack but with Windows registry registration and shortcut
+    /// creation. On non-Windows, behaves like unpack.
+    Install {
+        /// Path to the .gim manifest file.
+        gim_file: PathBuf,
+        /// Output directory.
+        output_dir: PathBuf,
+        /// Install a specific snapshot (default: HEAD/latest).
+        #[arg(long = "snapshot")]
+        snapshot: Option<String>,
+        /// Also restore game tracking (add to gim registry).
+        #[arg(long = "track")]
+        track: bool,
+        /// Number of threads (default: total - 1).
+        #[arg(long, short = 't')]
+        threads: Option<usize>,
+        /// Run interactive setup wizard.
+        #[arg(long = "interactive", alias = "setup")]
+        interactive: bool,
+        /// Dry run — show what would be installed.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
 }

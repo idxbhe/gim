@@ -8,10 +8,12 @@ pub mod ignore_cmd;
 pub mod list;
 pub mod log_cmd;
 pub mod migrate;
+pub mod repack;
 pub mod remove;
 pub mod restore;
 pub mod snap;
 pub mod status;
+pub mod unpack;
 
 use crate::cli::Command;
 use crate::error::{exit_code, GError, GResult};
@@ -53,6 +55,9 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Ignore { alias, add, remove, list, edit } => ignore_cmd::run(c, alias.clone(), add.clone(), remove.clone(), *list, *edit),
         Command::Config { alias, get, set, unset, list, yes } => config_cmd::run(c, alias.clone(), get.clone(), set.clone(), unset.clone(), *list, *yes, p),
         Command::Migrate { alias } => migrate::run(c, alias.clone()),
+        Command::Repack { alias, profile, level, snapshots, threads, memory, output, dry_run } => repack::run(c, alias.clone(), profile.clone(), *level, snapshots.clone(), *threads, *memory, output.clone(), *dry_run, p),
+        Command::Unpack { gim_file, output_dir, snapshot, track, threads, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, false, false, p),
+        Command::Install { gim_file, output_dir, snapshot, track, threads, interactive, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, true, *interactive, p),
     }
 }
 

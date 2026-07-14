@@ -22,6 +22,10 @@ pub enum GError {
     #[error("snapshot \"{0}\" is referenced by {1} branch(es): {2}")] SnapshotReferencedByBranch(String, usize, String),
     #[error("rehash cancelled by user")] RehashCancelled,
     #[error("hash algorithm mismatch: config says \"{0}\" but snapshot data uses \"{1}\"")] HashAlgorithmMismatch(String, String),
+    #[error("repack error: {0}")] Repack(String),
+    #[error("unpack error: {0}")] Unpack(String),
+    #[error("xtool error: {0}")] Xtool(String),
+    #[error("invalid manifest: {0}")] InvalidManifest(String),
     #[error("sqlite error: {0}")] Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")] Io(#[from] io::Error),
     #[error("path error: {0}")] Path(String),
@@ -43,7 +47,8 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::Config(_) | GError::BranchNotFound(_, _) | GError::BranchExists(_, _)
         | GError::CannotDeleteCurrentBranch(_) | GError::CannotDeleteMainBranch
         | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _)
-        | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _) => 2,
+        | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _)
+        | GError::InvalidManifest(_) => 2,
         _ => 1,
     }
 }
