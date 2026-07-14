@@ -7,7 +7,6 @@ use crate::output::{Colorizer, ProgressReporter};
 use crate::output::format_size;
 use crate::repack::{CompressionConfig, CompressionProfile, GimFile, GimManifest, GimObject, GimSnapshot, GimGameInfo, GimCompressionInfo, GimObjectsFile, Xtool};
 use crate::storage::Cas;
-use std::io::Write;
 use std::path::PathBuf;
 
 pub fn run(
@@ -46,7 +45,7 @@ pub fn run(
         Some(ids) => {
             let mut out = Vec::new();
             for id in ids {
-                let snap = sdb.get_snapshot(id)?.ok_or_else(|| GError::SnapshotNotFound(id.clone(), alias.clone()))?;
+                let _snap = sdb.get_snapshot(id)?.ok_or_else(|| GError::SnapshotNotFound(id.clone(), alias.clone()))?;
                 out.push(all_snaps.iter().find(|s| &s.snapshot_id == id).unwrap());
             }
             out

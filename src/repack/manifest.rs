@@ -4,7 +4,6 @@
 //! metadata needed to reconstruct the game: snapshots, file entries,
 //! CAS object offsets, compression settings.
 
-use crate::hashing::Hash;
 use serde::{Deserialize, Serialize};
 
 /// Top-level manifest structure. Serialized as JSON to `.gim` file.

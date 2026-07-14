@@ -14,6 +14,7 @@ pub fn run(c: &Colorizer, alias: String, dry_run: bool, progress: &ProgressRepor
     let sdb = SnapsDb::open(&paths.snaps_db(&alias))?;
     let ref_h = sdb.referenced_hashes()?;
     let cas = Cas::new(paths.objects_dir(&alias));
+    cas.cleanup_tmp_files()?;
 
     // ── Scan phase ──────────────────────────────────────────────────
     progress.scan_start();

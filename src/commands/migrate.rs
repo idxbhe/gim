@@ -10,7 +10,7 @@
 
 use crate::config::{env_data_dir_override, Paths};
 use crate::db::schema;
-use crate::error::{GError, GResult};
+use crate::error::GResult;
 use crate::output::Colorizer;
 use rusqlite::Connection;
 

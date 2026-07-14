@@ -7,6 +7,7 @@ use crate::output::{Colorizer, ProgressReporter};
 use crate::output::format_size;
 use crate::storage::Cas;
 use crate::walker::{walk_and_hash, SnapFilter, WalkOptions};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 pub fn run(
@@ -42,7 +43,29 @@ pub fn run(
         Some(id) => { validate_id(&id)?; if sdb.get_snapshot(&id)?.is_some() { progress.phase_cancel(); return Err(GError::SnapshotIdExists(id, alias.clone())); } id }
         None => match &pid {
             None => "original".to_string(),
-            Some(_) => { let base = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string(); let mut cand = base.clone(); let mut s = 2u32; while sdb.get_snapshot(&cand)?.is_some() { cand = format!("{base}-{s}"); s += 1; } cand }
+            Some(_) => {
+                // Generate ID from timestamp. If collision (two snaps
+                // within the same second), append a suffix. Use a single
+                // query to find existing IDs with this prefix, avoiding
+                // repeated DB queries in a loop.
+                let base = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+                let existing: Vec<String> = sdb.conn()
+                    .prepare("SELECT snapshotId FROM snaps WHERE snapshotId LIKE ?1")?
+                    .query_map(rusqlite::params![format!("{base}%")], |r| r.get::<_, String>(0))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                if !existing.contains(&base) {
+                    base
+                } else {
+                    // Find the max suffix and increment.
+                    let max_suffix = existing.iter()
+                        .filter_map(|id| id.strip_prefix(&format!("{base}-")))
+                        .filter_map(|s| s.parse::<u32>().ok())
+                        .max()
+                        .unwrap_or(1);
+                    format!("{base}-{}", max_suffix + 1)
+                }
+            }
         },
     };
 
@@ -127,23 +150,53 @@ pub fn run(
 
     let cas = Cas::new(paths.objects_dir(&alias));
     cas.ensure()?;
-    let mut written = Vec::new();
 
-    // Only store NEW or MODIFIED objects to CAS.
-    // Inherited files don't need storage — their objects already exist.
-    let to_store: Vec<&crate::walker::HashedFile> = hashed
+    // ── Parallel CAS existence check + store ────────────────────────
+    // Find files that need CAS storage: new or modified (not in parent
+    // or hash differs), AND not already in CAS (deduplication).
+    //
+    // Step 1: Filter to new/modified files (in-memory, no I/O).
+    let needs_store: Vec<&crate::walker::HashedFile> = hashed
         .iter()
         .filter(|f| match pf.get(&f.file_path) {
             None => true,
             Some(pm) => pm.hash != f.hash,
         })
-        .filter(|f| !cas.exists(&f.hash))
         .collect();
+
+    // Step 2: Check CAS existence in PARALLEL (avoids 50k sequential
+    // stat() syscalls for large games).
+    let to_store: Vec<&crate::walker::HashedFile> = crate::parallel::global().install(|| {
+        needs_store
+            .par_iter()
+            .filter(|f| !cas.exists(&f.hash))
+            .copied()
+            .collect()
+    });
+
+    // Step 3: Store to CAS in PARALLEL (copy files concurrently).
     progress.store_start(to_store.len());
-    for f in &to_store {
-        let abs = crate::path_utils::denormalize(&game.game_dir, &f.file_path);
-        match cas.store_from(&abs, &f.hash) {
-            Ok(()) => { written.push((f.hash.clone(), f.file_size)); progress.store_tick(); }
+    let game_dir_ref = &game.game_dir;
+    let cas_ref = &cas;
+    let progress_ref = progress;
+    let store_results: Vec<Result<(crate::hashing::Hash, i64), GError>> =
+        crate::parallel::global().install(|| {
+            to_store
+                .par_iter()
+                .map(|f| {
+                    let abs = crate::path_utils::denormalize(game_dir_ref, &f.file_path);
+                    cas_ref.store_from(&abs, &f.hash)?;
+                    progress_ref.store_tick();
+                    Ok((f.hash.clone(), f.file_size))
+                })
+                .collect()
+        });
+
+    // Collect results — if any error, rollback all stored objects.
+    let mut written = Vec::with_capacity(store_results.len());
+    for r in store_results {
+        match r {
+            Ok(pair) => written.push(pair),
             Err(e) => {
                 for (h, _) in &written { let _ = cas.delete(h.as_str()); }
                 progress.phase_cancel();

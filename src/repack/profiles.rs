@@ -100,7 +100,6 @@ impl CompressionConfig {
         let threads = total_threads.saturating_sub(1).max(1);
 
         let total_mem = sys.total_memory();
-        let available_mem = sys.available_memory();
         // Use 80% of (total RAM + pagefile). sysinfo reports total_memory
         // as RAM only. We estimate: 80% of total RAM, leave 20% for OS.
         // Pagefile is not directly available via sysinfo, so we use

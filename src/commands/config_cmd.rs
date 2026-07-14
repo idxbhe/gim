@@ -23,7 +23,7 @@ pub fn run(
     get: Option<String>,
     set: Option<Vec<String>>,
     unset: Option<String>,
-    list: bool,
+    _list: bool,
     yes: bool,
     progress: &ProgressReporter,
 ) -> GResult<()> {
