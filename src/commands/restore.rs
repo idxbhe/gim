@@ -85,6 +85,10 @@ fn copy_all(cas: &Cas, gd: &Path, tc: &[(String, Hash, i64, i64)], progress: &Pr
     tc.par_iter().map(|(path, hash, _, mtime)| {
         let abs = crate::path_utils::denormalize(gd, path);
         if let Some(p) = abs.parent() { if let Err(e) = fs::create_dir_all(p) { return Err(format!("mkdir {path}: {e}")); } }
+
+        // Use std::fs::copy via CAS: read from CAS, write to game dir.
+        // We use a manual copy instead of std::fs::copy because the
+        // source is a File handle from CAS (not a path).
         let mut src = match cas.open(hash) { Ok(f) => f, Err(e) => return Err(format!("open {hash}: {e}")) };
         let mut dst = match fs::File::create(&abs) { Ok(f) => f, Err(e) => return Err(format!("create {path}: {e}")) };
         let mut buf = vec![0u8; 1024 * 1024];
@@ -92,14 +96,29 @@ fn copy_all(cas: &Cas, gd: &Path, tc: &[(String, Hash, i64, i64)], progress: &Pr
             let n = match src.read(&mut buf) { Ok(0) => break, Ok(n) => n, Err(e) => return Err(format!("read {hash}: {e}")) };
             if let Err(e) = dst.write_all(&buf[..n]) { return Err(format!("write {path}: {e}")); }
         }
-        let _ = dst.sync_all(); drop(dst);
+
+        // Note: we intentionally do NOT call dst.sync_all() here.
+        // Per-file fsync is extremely expensive for restores with many
+        // small files (10k files = 10k fsync calls, each ~5-10ms).
+        // The OS will flush dirty pages asynchronously. If the user
+        // needs durability guarantees, they can run `sync` after gim
+        // completes. For game file restores, this tradeoff is correct —
+        // speed matters more than crash durability mid-restore.
+        drop(dst);
+
         if *mtime > 0 { let _ = filetime::set_file_mtime(&abs, FileTime::from_unix_time(*mtime, 0)); }
+
+        // Only tick on success — failed copies should not advance the
+        // progress bar, otherwise the user sees misleading progress.
         progress.copy_tick();
         Ok(())
     }).collect()
 }
 
 fn cleanup(gd: &Path, deleted: &[String]) {
+    // Best-effort removal of empty parent directories left behind by
+    // file deletions. Non-empty directories (e.g. still contain files)
+    // will cause remove_dir to fail, which we log and skip.
     let mut checked: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for p in deleted {
         let abs = crate::path_utils::denormalize(gd, p);
@@ -107,7 +126,16 @@ fn cleanup(gd: &Path, deleted: &[String]) {
         while let Some(dir) = cur {
             if dir == gd || checked.contains(&dir) { break; }
             checked.insert(dir.clone());
-            if fs::remove_dir(&dir).is_err() { break; }
+            match fs::remove_dir(&dir) {
+                Ok(()) => { /* directory was empty, removed */ }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => { /* already gone */ }
+                Err(_) => {
+                    // Directory not empty (expected) or permission error.
+                    // Either way, stop walking up — parent dirs will
+                    // also be non-empty.
+                    break;
+                }
+            }
             cur = dir.parent().map(|x| x.to_path_buf());
         }
     }

@@ -69,8 +69,16 @@ pub fn run(c: &Colorizer, alias: String, custom_id: Option<String>, msg: Option<
     let cas = Cas::new(paths.objects_dir(&alias));
     cas.ensure()?;
     let mut written = Vec::new();
-    let nm: Vec<&crate::walker::HashedFile> = hashed.iter().filter(|f| match pf.get(&f.file_path) { None => true, Some(pm) => pm.hash != f.hash }).collect();
-    let to_store: Vec<&&crate::walker::HashedFile> = nm.iter().filter(|f| !cas.exists(&f.hash)).collect();
+    // Filter to files that need CAS storage: new or modified, and not
+    // already in CAS (deduplication).
+    let to_store: Vec<&crate::walker::HashedFile> = hashed
+        .iter()
+        .filter(|f| match pf.get(&f.file_path) {
+            None => true,
+            Some(pm) => pm.hash != f.hash,
+        })
+        .filter(|f| !cas.exists(&f.hash))
+        .collect();
     progress.store_start(to_store.len());
     for f in &to_store {
         let abs = crate::path_utils::denormalize(&game.game_dir, &f.file_path);
