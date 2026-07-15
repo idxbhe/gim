@@ -55,7 +55,7 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Ignore { alias, add, remove, list, edit } => ignore_cmd::run(c, alias.clone(), add.clone(), remove.clone(), *list, *edit),
         Command::Config { alias, get, set, unset, list, yes } => config_cmd::run(c, alias.clone(), get.clone(), set.clone(), unset.clone(), *list, *yes, p),
         Command::Migrate { alias } => migrate::run(c, alias.clone()),
-        Command::Repack { alias, profile, level, snapshots, threads, memory, output, dry_run } => repack::run(c, alias.clone(), profile.clone(), *level, snapshots.clone(), *threads, *memory, output.clone(), *dry_run, p),
+        Command::Repack { alias, profile, list_profiles, level, snapshots, threads, memory, output, dry_run } => repack::run(c, alias.clone(), profile.clone(), *list_profiles, *level, snapshots.clone(), *threads, *memory, output.clone(), *dry_run, p),
         Command::Unpack { gim_file, output_dir, snapshot, track, threads, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, false, false, p),
         Command::Install { gim_file, output_dir, snapshot, track, threads, interactive, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, true, *interactive, p),
     }

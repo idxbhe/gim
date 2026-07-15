@@ -70,21 +70,29 @@ pub enum Command {
     /// Uses xtool for precompression. Output goes to
     /// [bin_dir]/repacked/[game_title]/.
     Repack {
-        alias: String,
-        /// Compression profile: fast, balanced, max.
-        #[arg(long, default_value = "balanced")]
-        profile: String,
-        /// Compression level 1-10 (overrides profile default).
+        alias: Option<String>,
+        /// Compression profile name or filename.
+        /// Can be: profile name ("zstd"), filename ("zstd.gimprofile"),
+        /// or full path. Use --list-profiles to see available profiles.
+        /// If alias is omitted, --list-profiles is implied.
+        #[arg(long)]
+        profile: Option<String>,
+        /// List all available compression profiles and exit.
+        #[arg(long = "list-profiles")]
+        list_profiles: bool,
+        /// Compression level (overrides profile default).
+        /// Range depends on codec:
+        ///   zstd: 1-22, zlib: 1-9, lz4: 1-12, oodle: 1-8
         #[arg(long)]
         level: Option<u32>,
         /// Only repack this specific snapshot (no history).
         /// Can be repeated for multiple snapshots.
         #[arg(long = "snapshot")]
         snapshots: Option<Vec<String>>,
-        /// Number of threads (default: total - 1).
+        /// Number of threads (default: profile setting or total - 1).
         #[arg(long, short = 't')]
         threads: Option<usize>,
-        /// Memory limit in MB (default: 80% of RAM).
+        /// Memory limit in MB (default: profile setting or 80% of RAM).
         #[arg(long)]
         memory: Option<u64>,
         /// Output directory (default: [bin_dir]/repacked/[game_title]).

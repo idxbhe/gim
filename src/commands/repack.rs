@@ -5,14 +5,15 @@ use crate::db::{GamesDb, SnapsDb};
 use crate::error::{GError, GResult};
 use crate::output::{Colorizer, ProgressReporter};
 use crate::output::format_size;
-use crate::repack::{CompressionConfig, CompressionProfile, GimFile, GimManifest, GimObject, GimSnapshot, GimGameInfo, GimCompressionInfo, GimObjectsFile, Xtool};
+use crate::repack::{ProfileFile, GimFile, GimGameInfo, GimCompressionInfo, GimManifest, GimObject, GimObjectsFile, GimSnapshot, Xtool};
 use crate::storage::Cas;
 use std::path::PathBuf;
 
 pub fn run(
     c: &Colorizer,
-    alias: String,
-    profile: String,
+    alias: Option<String>,
+    profile_name: Option<String>,
+    list_profiles: bool,
     level: Option<u32>,
     snapshots: Option<Vec<String>>,
     threads: Option<usize>,
@@ -21,25 +22,47 @@ pub fn run(
     dry_run: bool,
     progress: &ProgressReporter,
 ) -> GResult<()> {
-    progress.phase_start("preparing", 0);
-
     let mut paths = Paths::from_env()?;
     if let Some(o) = env_data_dir_override() { paths = paths.with_data_dir(o); }
     paths.ensure_data_dir()?;
+
+    // Ensure built-in profiles exist.
+    let profiles_dir = paths.binary_dir.join("xtool").join("profiles");
+    ProfileFile::ensure_builtins(&profiles_dir)?;
+
+    // ── --list-profiles ────────────────────────────────────────────
+    if list_profiles || (alias.is_none() && profile_name.is_none()) {
+        let profiles = ProfileFile::list_all(&profiles_dir)?;
+        if profiles.is_empty() {
+            println!("no profiles found in {}", profiles_dir.display());
+            return Ok(());
+        }
+        println!("available compression profiles:\n");
+        for (filename, p) in &profiles {
+            println!("  {} ({})", c.bold(&p.name), c.dim(filename));
+            println!("    {}", p.description);
+            println!("    {}", c.dim(&p.summary()));
+            println!();
+        }
+        return Ok(());
+    }
+
+    // ── Resolve alias ──────────────────────────────────────────────
+    let alias = alias.ok_or_else(|| GError::Other(
+        "alias is required for repack. Use --list-profiles to list available profiles.".into()
+    ))?;
+
+    // ── Load profile ───────────────────────────────────────────────
+    let profile_name = profile_name.as_deref().unwrap_or("zstd");
+    let profile = ProfileFile::load_by_name(&profiles_dir, profile_name)?;
+
+    // ── Resolve game + snapshots ───────────────────────────────────
+    progress.phase_start("preparing", 0);
     let gdb = GamesDb::open(&paths.games_db)?;
     let game = gdb.get(&alias)?.ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
     let sdb = SnapsDb::open(&paths.snaps_db(&alias))?;
-
-    // Load config.
     let cfg = GimConfig::load_game(&paths, &alias)?;
 
-    // Parse compression profile.
-    let profile = CompressionProfile::parse(&profile)?;
-    let mut comp_config = CompressionConfig::new(profile, level);
-    if let Some(t) = threads { comp_config.threads = t; }
-    if let Some(m) = memory { comp_config.memory_mb = m; }
-
-    // Determine which snapshots to repack.
     let all_snaps = sdb.list_snapshots()?;
     let snaps_to_pack: Vec<&crate::db::Snap> = match &snapshots {
         Some(ids) => {
@@ -58,7 +81,6 @@ pub fn run(
         return Err(GError::NoSnapshots(alias.clone()));
     }
 
-    // Determine output directory.
     let output_dir = output.unwrap_or_else(|| {
         paths.binary_dir.join("repacked").join(&game.title)
     });
@@ -67,11 +89,8 @@ pub fn run(
 
     if dry_run {
         println!("dry run: would repack {} snapshot(s) for \"{}\"", snaps_to_pack.len(), game.title);
-        println!("  profile: {}", comp_config.profile);
-        println!("  level: {}", comp_config.level);
-        println!("  threads: {}", comp_config.threads);
-        println!("  memory: {}mb", comp_config.memory_mb);
-        println!("  codecs: {}", comp_config.profile.codec_string());
+        println!("  profile: {} ({})", profile.name, profile.summary());
+        if let Some(l) = level { println!("  level override: {}", l); }
         println!("  output: {}", output_dir.display());
         println!("\n  snapshots:");
         for s in &snaps_to_pack {
@@ -82,8 +101,6 @@ pub fn run(
 
     // Find xtool.
     let xtool = Xtool::find(&paths.binary_dir)?;
-
-    // Create output directory.
     std::fs::create_dir_all(&output_dir)?;
 
     // ── Phase 1: Collect all unique CAS objects ────────────────────
@@ -101,19 +118,12 @@ pub fn run(
     let hash_list: Vec<String> = all_hashes.into_iter().collect();
     progress.phase_cancel();
 
-    // ── Phase 2: Precompress objects → objects.bin ─────────────────
+    // ── Phase 2: Pack objects → objects.bin ────────────────────────
     progress.phase_start("packing objects", hash_list.len());
     let objects_file = output_dir.join("objects.bin");
     let mut obj_entries: Vec<GimObject> = Vec::with_capacity(hash_list.len());
     let mut obj_offset: u64 = 0;
 
-    // We pack all objects into a single concatenated file, then
-    // precompress the whole thing at once (xtool processes stdin → stdout).
-    // But xtool's precomp works on a single stream. For per-object
-    // compression, we'd need to call xtool per object (slow).
-    //
-    // Better approach: concatenate all objects into a temp file, then
-    // precompress the temp file → objects.bin. Record offsets.
     let temp_cat = output_dir.join(".objects.tmp");
     {
         let mut f = std::fs::File::create(&temp_cat)?;
@@ -125,7 +135,7 @@ pub fn run(
             obj_entries.push(GimObject {
                 hash: hash.clone(),
                 offset,
-                compressed_size: written, // will update after precompress
+                compressed_size: written,
                 orig_size: written,
             });
             obj_offset += written;
@@ -134,45 +144,23 @@ pub fn run(
         f.sync_all()?;
     }
 
-    // Precompress the concatenated objects.
-    let encode_args = comp_config.xtool_encode_args();
+    let encode_args = profile.xtool_encode_args(level, threads, memory);
     progress.phase_cancel();
     progress.phase_start("compressing objects", 0);
     xtool.encode(&temp_cat, &objects_file, &encode_args)?;
     let _ = std::fs::remove_file(&temp_cat);
     progress.phase_cancel();
 
-    // Update compressed_size in obj_entries based on actual output size.
-    // Since we precompressed the whole file at once, individual offsets
-    // in the compressed file are NOT the same as in the uncompressed file.
-    // We need to store objects as: [hash][orig_size] + precompressed data,
-    // OR store offsets in the UNCOMPRESSED stream and decode the whole
-    // file during unpack.
-    //
-    // Simplest correct approach: during unpack, decode the entire
-    // objects.bin to a temp file, then read objects by offset/size
-    // from the decoded file. This means obj_entries store offsets
-    // in the DECODED (original) stream.
-    //
-    // We already have the offsets from the concatenation. The
-    // compressed_size field is not per-object (whole-file compressed).
-    // Let's store the decoded offsets and orig_size, and during unpack
-    // we decode the whole file first.
-
-    // ── Phase 3: Pack each snapshot's file list ────────────────────
+    // ── Phase 3: Pack each snapshot's file list ───────────────────
     let mut snap_entries: Vec<GimSnapshot> = Vec::with_capacity(snaps_to_pack.len());
     for snap in &snaps_to_pack {
         progress.phase_start(&format!("packing {}", snap.snapshot_id), 0);
-
         let files = sdb.files_for_snapshot(&snap.snapshot_id)?;
         let gim_files: Vec<GimFile> = files.iter().map(|(path, meta)| GimFile {
-            path: path.clone(),
-            hash: meta.hash.0.clone(),
-            size: meta.file_size,
-            mtime: meta.modified_time,
+            path: path.clone(), hash: meta.hash.0.clone(),
+            size: meta.file_size, mtime: meta.modified_time,
         }).collect();
 
-        // Serialize file list to JSON, precompress, write to file.
         let snap_json = serde_json::to_vec(&gim_files)?;
         let snap_tmp = output_dir.join(format!(".{}.tmp", snap.snapshot_id));
         let snap_bin = output_dir.join(format!("{}.bin", snap.snapshot_id));
@@ -181,50 +169,48 @@ pub fn run(
         let _ = std::fs::remove_file(&snap_tmp);
 
         snap_entries.push(GimSnapshot {
-            id: snap.snapshot_id.clone(),
-            parent: snap.parent_snap_id.clone(),
-            timestamp: snap.timestamp,
-            message: snap.message.clone(),
-            file_count: snap.file_count,
-            added_size: snap.added_size,
-            data_file: format!("{}.bin", snap.snapshot_id),
-            files: gim_files,
+            id: snap.snapshot_id.clone(), parent: snap.parent_snap_id.clone(),
+            timestamp: snap.timestamp, message: snap.message.clone(),
+            file_count: snap.file_count, added_size: snap.added_size,
+            data_file: format!("{}.bin", snap.snapshot_id), files: gim_files,
         });
         progress.phase_cancel();
     }
 
-    // ── Phase 4: Write manifest .gim ────────────────────────────────
+    // ── Phase 4: Write manifest ────────────────────────────────────
     progress.phase_start("writing manifest", 0);
     let manifest = GimManifest {
         version: 1,
-        game: GimGameInfo {
-            title: game.title.clone(),
-            alias: alias.clone(),
-        },
+        game: GimGameInfo { title: game.title.clone(), alias: alias.clone() },
         config: serde_json::json!({
             "hash.algorithm": cfg.get("hash.algorithm"),
         }),
         compression: GimCompressionInfo {
-            profile: comp_config.profile.as_str().to_string(),
-            level: comp_config.level,
-            codecs: comp_config.profile.codecs(),
-            chunk_size: comp_config.profile.chunk_size().to_string(),
+            profile: profile.name.clone(),
+            level: level.unwrap_or(profile.level),
+            codecs: profile.codecs.split('+').map(|s| s.to_string()).collect(),
+            chunk_size: profile.chunk_size.clone(),
             xtool_version: "0.7.9".to_string(),
         },
         snapshots: snap_entries,
-        objects: GimObjectsFile {
-            file: "objects.bin".to_string(),
-            entries: obj_entries,
-        },
+        objects: GimObjectsFile { file: "objects.bin".to_string(), entries: obj_entries },
     };
-
     let gim_path = output_dir.join("game.gim");
     std::fs::write(&gim_path, manifest.to_json()?)?;
+
+    // Copy dedup file if exists.
+    if !profile.dedup.is_empty() {
+        let dedup_src = output_dir.join(&profile.dedup);
+        if dedup_src.exists() {
+            // dedup file is already in output_dir (xtool writes to cwd)
+        }
+    }
+
     progress.phase_cancel();
 
-    // Report.
     let objects_size = std::fs::metadata(&objects_file)?.len();
     println!("repacked {} → {}", c.green(&alias), c.bold(&output_dir.display().to_string()));
+    println!("  profile: {} ({})", profile.name, profile.summary());
     println!("  {} snapshots, {} objects", manifest.snapshots.len(), manifest.objects.entries.len());
     println!("  objects.bin: {} (compressed)", format_size(objects_size as i64));
     println!("  manifest: {}", gim_path.display());

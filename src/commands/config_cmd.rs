@@ -110,7 +110,9 @@ pub fn run(
     println!("config ({scope}):\n");
     for (key, val, is_default) in cfg.list_all() {
         let marker = if is_default { c.dim("(default)") } else { String::new() };
+        let desc = config_value_description(&key, &val);
         println!("  {key} = {val} {marker}");
+        println!("    {}", c.dim(&desc));
     }
     Ok(())
 }
@@ -208,4 +210,16 @@ fn rehash_game(
     println!("rehashed {} objects with {}", hash_map.len(), new_algo);
     println!("run `gim gc {alias}` to clean up old objects");
     Ok(())
+}
+
+/// Return a human-readable description of valid values for a config key.
+fn config_value_description(key: &str, _current_val: &str) -> String {
+    match key {
+        "hash.algorithm" => "options: xxhash (fast, non-crypto) | blake3 (crypto, slower)".to_string(),
+        "hash.threads" => "0 = auto (use all CPUs) | N = exact thread count".to_string(),
+        "hash.parallel" => "true = parallel hashing (SSD) | false = sequential (HDD)".to_string(),
+        "snapshot.auto_gc" => "true = auto gc after snap | false = manual gc only".to_string(),
+        "snapshot.lock_retry" => "number of retries on locked files (0 = no retry)".to_string(),
+        _ => String::new(),
+    }
 }
