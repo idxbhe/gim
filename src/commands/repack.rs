@@ -28,7 +28,7 @@ pub fn run(
 
     // Ensure built-in profiles exist.
     let profiles_dir = paths.binary_dir.join("xtool").join("profiles");
-    ProfileFile::ensure_builtins(&profiles_dir)?;
+    ProfileFile::ensure_dir(&profiles_dir)?;
 
     // ── --list-profiles ────────────────────────────────────────────
     if list_profiles || (alias.is_none() && profile_name.is_none()) {

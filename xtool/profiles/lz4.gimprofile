@@ -1,0 +1,26 @@
+# ──────────────────────────────────────────────────────────────────────
+# gim compression profile: lz4
+# ──────────────────────────────────────────────────────────────────────
+# lz4 is the fastest precompression codec. Extremely fast encode and
+# decode, but lower compression ratio than zstd.
+# Good for: quick repacks, testing, or when unpack speed is critical.
+#
+# See zstd.gimprofile for full documentation of all options.
+
+name = "lz4"
+description = "LZ4 — fastest codec, lower ratio, extremely fast unpack"
+
+codecs = "lz4+preflate"
+
+# lz4 level range: 1-12
+# 6 = mid-range, good balance of speed and ratio
+level = 6
+
+chunk_size = "64mb"
+threads = "0"
+memory = "0"
+depth = 0
+dbase = true
+dedup = "dedup.bin"
+diff = "5p"
+low_memory = false

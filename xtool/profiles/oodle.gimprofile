@@ -1,0 +1,34 @@
+# ──────────────────────────────────────────────────────────────────────
+# gim compression profile: oodle
+# ──────────────────────────────────────────────────────────────────────
+# oodle is the codec used by Unreal Engine and many AAA games.
+# Supports sub-codecs for specific stream types:
+#   kraken    — most common Oodle format
+#   mermaid   — faster than kraken, slightly lower ratio
+#   selkie    — fastest oodle, lowest ratio
+#   hydra     — combination of kraken + mermaid
+#   leviathan — highest ratio oodle, slowest
+#   lzna      — legacy oodle format
+#
+# Best for: Unreal Engine games, Epic Games Store titles.
+# See zstd.gimprofile for full documentation of all options.
+
+name = "oodle"
+description = "Oodle (kraken+mermaid) — best for Unreal Engine games"
+
+# Use kraken + mermaid to cover most oodle stream variants.
+# Add "+zstd" to also catch zstd streams if the game uses mixed codecs.
+codecs = "kraken+mermaid+preflate"
+
+# oodle level range: 1-8
+# 4 = mid-range (xtool docs recommend l4 for kraken)
+level = 4
+
+chunk_size = "64mb"
+threads = "0"
+memory = "0"
+depth = 0
+dbase = true
+dedup = "dedup.bin"
+diff = "5p"
+low_memory = false
