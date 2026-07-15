@@ -13,12 +13,13 @@ impl Cas {
 
     pub fn ensure(&self) -> GResult<()> {
         fs::create_dir_all(&self.objects_dir)?;
+        // Cleanup any stale .tmp.* files from previous crashes.
+        self.cleanup_tmp_files()?;
         Ok(())
     }
 
     /// Remove stale `.tmp.*` files left by interrupted store_from calls.
-    /// Called by `gim gc` — not during `ensure()` to avoid startup delay.
-    pub fn cleanup_tmp_files(&self) -> GResult<()> {
+    fn cleanup_tmp_files(&self) -> GResult<()> {
         if !self.objects_dir.exists() { return Ok(()); }
         for entry in fs::read_dir(&self.objects_dir)? {
             let entry = entry?;
@@ -66,22 +67,20 @@ impl Cas {
         std::fs::copy(src, &tmp_path)?;
 
         // fsync the tmp file to ensure durability before rename.
-        // Open with write access — on Windows, FlushFileBuffers requires
-        // write access. Using read-only File::open would silently fail.
-        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&tmp_path) {
-            if let Err(e) = f.sync_all() {
-                log::debug!("fsync failed for {:?}: {}", tmp_path, e);
-            }
+        if let Ok(f) = File::open(&tmp_path) {
+            let _ = f.sync_all();
         }
 
         match fs::rename(&tmp_path, &final_path) {
             Ok(()) => {
+                // Rename succeeded — tmp file no longer exists.
+                // Tell the guard NOT to delete (the file is gone).
                 guard.keep();
                 Ok(())
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && final_path.exists() => {
-                // Another process won the race — the final object exists.
-                // Our tmp file will be deleted by the guard on drop.
+            Err(_) if final_path.exists() => {
+                // Another process won the race — our tmp file will be
+                // deleted by the guard on drop.
                 Ok(())
             }
             Err(e) => Err(GError::Io(e)),

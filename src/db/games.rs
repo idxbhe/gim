@@ -17,16 +17,7 @@ impl GamesDb {
         Ok(Self { conn })
     }
     pub fn add(&self, alias: &str, title: &str, gd: &Path, dd: &Path) -> GResult<()> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or_else(|_| {
-                // System clock is before UNIX_EPOCH (CMOS battery dead,
-                // NTP sync issue). Use 0 as fallback — the DB column
-                // has DEFAULT (unixepoch()) which would have been more
-                // correct, but we need a value for the explicit INSERT.
-                log::warn!("system clock is before UNIX epoch; using 0 as timestamp");
-                0
-            });
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         self.conn.execute("INSERT INTO games (alias, title, gameDir, dataDir, addedAt) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![alias, title, gd.to_string_lossy(), dd.to_string_lossy(), now])
             .map_err(|e| match e {

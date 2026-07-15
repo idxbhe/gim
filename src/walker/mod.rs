@@ -63,15 +63,45 @@ impl SnapFilter {
 
     pub fn is_empty(&self) -> bool { self.exclude.is_none() && self.include_only.is_none() }
 
-    /// Should this file path be walked? Returns false if excluded or
-    /// not matching include_only.
+    /// Check if a file path should be walked. Returns false if excluded
+    /// or not matching include_only.
+    ///
+    /// For directory patterns (e.g. `Config/`), we check ALL ancestor
+    /// directories of the file path with `is_dir=true`. Without this,
+    /// a pattern like `Config/` would not match individual files inside
+    /// the directory (e.g. `Config/settings.ini`) because gitignore
+    /// directory patterns only match the directory itself, not its
+    /// contents.
     pub fn should_walk(&self, path: &str) -> bool {
+        // Check the file itself (is_dir=false).
         if let Some(ref ex) = self.exclude {
             if matches!(ex.matched(Path::new(path), false), ignore::Match::Ignore(_)) { return false; }
         }
         if let Some(ref inc) = self.include_only {
             if !matches!(inc.matched(Path::new(path), false), ignore::Match::Ignore(_)) { return false; }
         }
+
+        // Check ancestor directories for directory patterns.
+        // E.g. for path "WellingtonGame/Config/DefaultSystemSettings.ini",
+        // check ancestors:
+        //   "WellingtonGame" (is_dir=true)
+        //   "WellingtonGame/Config" (is_dir=true) ← matches "WellingtonGame/Config/"
+        //
+        // This is needed because gitignore directory patterns (trailing /)
+        // only match with is_dir=true, not is_dir=false.
+        let parts: Vec<&str> = path.split('/').collect();
+        for i in 1..parts.len() {
+            let ancestor: String = parts[..i].join("/");
+            if let Some(ref ex) = self.exclude {
+                if matches!(ex.matched(Path::new(&ancestor), true), ignore::Match::Ignore(_)) {
+                    return false;
+                }
+            }
+            // For include_only, we do NOT check ancestors — the file
+            // must match the include_only pattern itself. A pattern like
+            // `mods/*` matches files directly, not via directory ancestors.
+        }
+
         true
     }
 
@@ -251,4 +281,44 @@ fn collect_candidates_parallel(
     }
     wt.join().map_err(|_| crate::error::GError::Other("walker thread panicked".into()))??;
     Ok(out)
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+
+    #[test]
+    fn exclude_dir_pattern_matches_files_inside() {
+        let filter = SnapFilter::new(
+            &["WellingtonGame/Config/".to_string()],
+            &[],
+        ).unwrap();
+        // File inside the excluded directory should NOT be walked.
+        assert!(!filter.should_walk("WellingtonGame/Config/DefaultSystemSettings.ini"));
+        assert!(!filter.should_walk("WellingtonGame/Config/subdir/file.txt"));
+        // File outside should be walked.
+        assert!(filter.should_walk("WellingtonGame/game.exe"));
+        assert!(filter.should_walk("other.txt"));
+    }
+
+    #[test]
+    fn exclude_glob_pattern_matches() {
+        let filter = SnapFilter::new(
+            &["*.log".to_string()],
+            &[],
+        ).unwrap();
+        assert!(!filter.should_walk("debug.log"));
+        assert!(!filter.should_walk("logs/error.log"));
+        assert!(filter.should_walk("game.exe"));
+    }
+
+    #[test]
+    fn include_only_matches() {
+        let filter = SnapFilter::new(
+            &[],
+            &["mods/*".to_string()],
+        ).unwrap();
+        assert!(filter.should_walk("mods/sky.dds"));
+        assert!(!filter.should_walk("game.exe"));
+    }
 }

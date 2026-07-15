@@ -23,7 +23,6 @@ impl Diff {
 
 pub struct SnapsDb { conn: Connection }
 impl SnapsDb {
-    pub fn conn(&self) -> &Connection { &self.conn }
     pub fn open(path: &Path) -> GResult<Self> {
         if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
         let conn = Connection::open(path)?;
