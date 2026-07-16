@@ -34,8 +34,13 @@ pub fn run(c: &Colorizer, alias: String, oneline: bool, json: bool, n: Option<us
     for s in &snaps {
         let br = by_snap.get(&s.snapshot_id).cloned().unwrap_or_default();
         let bm = fmt_b(&br, &cur, c);
-        let marker = if !bm.is_empty() { format!("  {}", bm) } else { String::new() };
-        println!("{}{} {}", c.yellow(&s.snapshot_id), if marker.is_empty() { String::new() } else { marker }, c.dim("(HEAD)"));
+        // Only show (HEAD) for the snapshot pointed to by the current branch.
+        let is_head = cur.as_ref().and_then(|cn| {
+            sdb.get_branch(cn).ok().flatten()
+        }).map(|b| b.snapshot_id == s.snapshot_id).unwrap_or(false);
+        let head_marker = if is_head { format!(" {}", c.dim("(HEAD)")) } else { String::new() };
+        let branch_marker = if !bm.is_empty() { format!("  {}", bm) } else { String::new() };
+        println!("{}{}{}", c.yellow(&s.snapshot_id), branch_marker, head_marker);
         println!("{} {}", c.dim("│"), s.message.clone().unwrap_or_else(|| "(no message)".into()));
         println!("{} {} {} {}\n", c.dim("│"), c.dim(&format!("{} files", s.file_count)), c.dim("|"), c.dim(&format_size_compact(s.added_size)));
     }

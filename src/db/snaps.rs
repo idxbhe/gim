@@ -179,6 +179,12 @@ impl SnapsDb {
         }
     }
     pub fn set_current_branch(&self, n: &str) -> GResult<()> { self.set_meta("current_branch", n) }
+
+    /// Update the snapshot a branch points to.
+    pub fn update_branch_snapshot(&self, name: &str, snapshot_id: &str) -> GResult<()> {
+        self.conn.execute("UPDATE branches SET snapshotId = ?1 WHERE name = ?2", params![snapshot_id, name])?;
+        Ok(())
+    }
     pub fn ensure_main_branch(&self) -> GResult<()> {
         if self.get_branch("main")?.is_none() && self.latest_snapshot()?.is_some() {
             self.insert_branch("main", &self.latest_snapshot()?.unwrap().snapshot_id)?;
