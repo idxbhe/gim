@@ -67,34 +67,24 @@ pub enum Command {
     /// Migrate database schema to latest version.
     Migrate { alias: Option<String> },
     /// Repack game snapshots into a compressed, portable archive.
-    /// Uses xtool for precompression. Output goes to
-    /// [bin_dir]/repacked/[game_title]/.
     Repack {
         alias: Option<String>,
-        /// Compression profile name or filename.
-        /// Can be: profile name ("zstd"), filename ("zstd.gimprofile"),
-        /// or full path. Use --list-profiles to see available profiles.
-        /// If alias is omitted, --list-profiles is implied.
+        /// Compression profile name or filename (e.g. "zstd" or "zstd.toml").
         #[arg(long)]
         profile: Option<String>,
         /// List all available compression profiles and exit.
         #[arg(long = "list-profiles")]
         list_profiles: bool,
         /// Compression level (overrides profile default).
-        /// Range depends on codec:
-        ///   zstd: 1-22, zlib: 1-9, lz4: 1-12, oodle: 1-8
+        /// zstd: 1-22, lzma: 1-9, lz4: 1-12
         #[arg(long)]
         level: Option<u32>,
         /// Only repack this specific snapshot (no history).
-        /// Can be repeated for multiple snapshots.
         #[arg(long = "snapshot")]
         snapshots: Option<Vec<String>>,
-        /// Number of threads (default: profile setting or total - 1).
+        /// Number of threads (default: auto, CPU-1).
         #[arg(long, short = 't')]
         threads: Option<usize>,
-        /// Memory limit in MB (default: profile setting or 80% of RAM).
-        #[arg(long)]
-        memory: Option<u64>,
         /// Output directory (default: [bin_dir]/repacked/[game_title]).
         #[arg(long = "output", short = 'o')]
         output: Option<PathBuf>,

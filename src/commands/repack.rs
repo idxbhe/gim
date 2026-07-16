@@ -24,7 +24,6 @@ pub fn run(
     level: Option<u32>,
     snapshots: Option<Vec<String>>,
     threads: Option<usize>,
-    _memory: Option<u64>,
     output: Option<PathBuf>,
     dry_run: bool,
     progress: &ProgressReporter,
@@ -160,11 +159,19 @@ pub fn run(
     progress.phase_cancel();
 
     // ── Phase 4: Layer 2 — compress ────────────────────────────────
+    // Compression is a single-shot operation (read file → compress → write).
+    // Show input size as context, then display ratio after completion.
+    let precomp_size = std::fs::metadata(&objects_precomp)?.len();
     progress.phase_start("compressing", 0);
     let objects_file = output_dir.join("objects.bin");
     compress_file(&objects_precomp, &objects_file, compress_algo, compress_level)?;
     let _ = std::fs::remove_file(&objects_precomp);
+    let comp_size = std::fs::metadata(&objects_file)?.len();
     progress.phase_cancel();
+
+    // Print compression stats for this phase.
+    let ratio = if precomp_size > 0 { (comp_size as f64 / precomp_size as f64 * 100.0) as u32 } else { 0 };
+    eprintln!("  compress: {} → {} ({}% of precompressed)", format_size(precomp_size as i64), format_size(comp_size as i64), ratio);
 
     // ── Phase 5: Pack each snapshot's file list ───────────────────
     let mut snap_entries: Vec<GimSnapshot> = Vec::with_capacity(snaps_to_pack.len());

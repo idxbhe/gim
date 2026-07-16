@@ -1,0 +1,21 @@
+# gim compression profile: lzma
+# LZMA2/XZ — best compression ratio, slower encode.
+# Output: smallest, Unpack: fast.
+
+name = "lzma"
+description = "LZMA2/XZ — smallest output, slower repack"
+
+[precomp]
+codecs = "auto"
+chunk_size = "64mb"
+depth = 0
+dbase = true
+dedup = true
+low_memory = false
+skip_verify = false
+threads = "0"
+
+[compress]
+algorithm = "lzma"
+level = 9
+threads = "0"
