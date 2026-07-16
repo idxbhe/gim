@@ -15,6 +15,7 @@ pub fn run(c: &Colorizer, alias: String, oneline: bool, json: bool, n: Option<us
     let gdb = GamesDb::open(&paths.games_db)?;
     gdb.get(&alias)?.ok_or_else(|| GError::AliasNotFound(alias.clone()))?;
     let sdb = SnapsDb::open(&paths.snaps_db(&alias))?;
+    sdb.ensure_main_branch()?;
     let mut snaps = sdb.list_snapshots()?;
     if let Some(n) = n { snaps.truncate(n); }
     let mut by_snap: HashMap<String, Vec<String>> = HashMap::new();

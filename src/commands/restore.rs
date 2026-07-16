@@ -75,8 +75,25 @@ pub fn run(c: &Colorizer, alias: String, sid: String, full: bool, threads: Optio
     for p in &td { let abs = crate::path_utils::denormalize(&gd, p); if abs.exists() { if let Err(e) = fs::remove_file(&abs) { errors.push(format!("delete {p}: {e}")); } } }
     cleanup(&gd, &td);
 
+    // ── Move branch pointer ─────────────────────────────────────
+    // After restoring files, move the current branch to point at the
+    // target snapshot.  This makes `gim restore` behave like
+    // `git reset --hard` — the branch follows the restore, so
+    // `gim status` will report a clean working tree.
+    sdb.ensure_main_branch()?;
+    let branch_moved = match sdb.get_current_branch()? {
+        Some(cur) if cur.snapshot_id != sid => {
+            sdb.update_branch_snapshot(&cur.name, &sid)?;
+            Some(cur.name)
+        }
+        _ => None,
+    };
+
     println!("restored {} to {}", c.green(&alias), c.bold(&sid));
     println!("  {} files copied, {} files deleted", tc.len(), td.len());
+    if let Some(bname) = &branch_moved {
+        println!("  branch {} → {}", c.green(bname), c.bold(&sid));
+    }
     if !errors.is_empty() { eprintln!("warning: {} error(s):", errors.len()); for e in &errors { eprintln!("  {e}"); } }
     Ok(())
 }
