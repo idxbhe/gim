@@ -31,14 +31,18 @@ pub struct GimGameInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GimCompressionInfo {
-    /// Profile name: "fast", "balanced", "max".
+    /// Profile name used.
     pub profile: String,
-    /// Compression level (1-10).
+    /// Layer 2: compression algorithm ("zstd", "lzma", "lz4").
+    pub algorithm: String,
+    /// Layer 2: compression level.
     pub level: u32,
-    /// xtool codecs used (e.g. ["zlib", "preflate"]).
-    pub codecs: Vec<String>,
-    /// Chunk size used by xtool (e.g. "64mb").
+    /// Layer 1: xtool codecs used.
+    pub precomp_codecs: String,
+    /// Layer 1: chunk size used by xtool.
     pub chunk_size: String,
+    /// Layer 1: whether dedup was used.
+    pub dedup: bool,
     /// xtool version string.
     pub xtool_version: String,
 }

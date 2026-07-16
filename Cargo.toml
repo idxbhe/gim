@@ -47,6 +47,9 @@ log = "0.4.22"
 env_logger = "0.11.5"
 sysinfo = "0.32.1"
 toml = "0.8.19"
+zstd = "0.13.2"
+lz4_flex = "0.11.3"
+xz2 = "0.1.7"
 
 [dev-dependencies]
 tempfile = "3.13.0"

@@ -1,11 +1,11 @@
-//! Repack module — compress snapshots + CAS objects into portable archives.
+//! Repack module.
 
+pub mod compression;
 pub mod manifest;
 pub mod profile_file;
-pub mod profiles;
 pub mod xtool;
 
+pub use compression::{CompressAlgorithm, compress_file, decompress_file};
 pub use manifest::{GimManifest, GimSnapshot, GimObject, GimFile, GimGameInfo, GimCompressionInfo, GimObjectsFile};
 pub use profile_file::ProfileFile;
-pub use profiles::{CompressionProfile, CompressionConfig};
 pub use xtool::Xtool;
