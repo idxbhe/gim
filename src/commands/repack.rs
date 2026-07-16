@@ -15,6 +15,7 @@ use crate::output::format_size;
 use crate::repack::{compress_file, CompressAlgorithm, ProfileFile, GimFile, GimGameInfo, GimCompressionInfo, GimManifest, GimObject, GimObjectsFile, GimSnapshot, Xtool};
 use crate::storage::Cas;
 use std::path::PathBuf;
+use std::time::Instant;
 
 pub fn run(
     c: &Colorizer,
@@ -151,27 +152,28 @@ pub fn run(
     progress.phase_cancel();
 
     // ── Phase 3: Layer 1 — xtool precomp ───────────────────────────
+    let raw_size = std::fs::metadata(&objects_raw)?.len();
+    let precomp_start = Instant::now();
     let xtool_args = profile.xtool_encode_args(threads);
     progress.phase_start("precompressing (xtool)", 0);
     let objects_precomp = output_dir.join(".objects.precomp");
     xtool.encode(&objects_raw, &objects_precomp, &xtool_args)?;
     let _ = std::fs::remove_file(&objects_raw);
     progress.phase_cancel();
-
-    // ── Phase 4: Layer 2 — compress ────────────────────────────────
-    // Compression is a single-shot operation (read file → compress → write).
-    // Show input size as context, then display ratio after completion.
+    let precomp_time = precomp_start.elapsed();
     let precomp_size = std::fs::metadata(&objects_precomp)?.len();
-    progress.phase_start("compressing", 0);
+
+    // ── Phase 4: Layer 2 — compress (streaming + progress bar) ─────
+    // Calculate total chunks for progress bar.
+    let total_chunks = (precomp_size / (1024 * 1024)).max(1) as usize;
+    let compress_start = Instant::now();
+    progress.hash_start(total_chunks); // reuse hash_start which shows a bar
     let objects_file = output_dir.join("objects.bin");
-    compress_file(&objects_precomp, &objects_file, compress_algo, compress_level)?;
+    compress_file(&objects_precomp, &objects_file, compress_algo, compress_level, progress)?;
     let _ = std::fs::remove_file(&objects_precomp);
     let comp_size = std::fs::metadata(&objects_file)?.len();
-    progress.phase_cancel();
-
-    // Print compression stats for this phase.
-    let ratio = if precomp_size > 0 { (comp_size as f64 / precomp_size as f64 * 100.0) as u32 } else { 0 };
-    eprintln!("  compress: {} → {} ({}% of precompressed)", format_size(precomp_size as i64), format_size(comp_size as i64), ratio);
+    progress.hash_done(total_chunks as u64);
+    let compress_time = compress_start.elapsed();
 
     // ── Phase 5: Pack each snapshot's file list ───────────────────
     let mut snap_entries: Vec<GimSnapshot> = Vec::with_capacity(snaps_to_pack.len());
@@ -192,7 +194,7 @@ pub fn run(
         std::fs::write(&snap_raw, &snap_json)?;
         xtool.encode(&snap_raw, &snap_precomp, &xtool_args)?;
         let _ = std::fs::remove_file(&snap_raw);
-        compress_file(&snap_precomp, &snap_bin, compress_algo, compress_level)?;
+        compress_file(&snap_precomp, &snap_bin, compress_algo, compress_level, progress)?;
         let _ = std::fs::remove_file(&snap_precomp);
 
         snap_entries.push(GimSnapshot {
@@ -228,11 +230,21 @@ pub fn run(
     std::fs::write(&gim_path, manifest.to_json()?)?;
     progress.phase_cancel();
 
-    let objects_size = std::fs::metadata(&objects_file)?.len();
+    let _objects_size = std::fs::metadata(&objects_file)?.len();
+    let total_time = precomp_time + compress_time;
+    let ratio = if raw_size > 0 { (comp_size as f64 / raw_size as f64 * 100.0) as u32 } else { 0 };
+
     println!("repacked {} → {}", c.green(&alias), c.bold(&output_dir.display().to_string()));
     println!("  profile: {} ({})", profile.name, profile.summary());
     println!("  {} snapshots, {} objects", manifest.snapshots.len(), manifest.objects.entries.len());
-    println!("  objects.bin: {} (compressed)", format_size(objects_size as i64));
+    println!();
+    println!("  {}", c.bold("summary:"));
+    println!("    raw:       {}", format_size(raw_size as i64));
+    println!("    precomp:   {} ({:.1}s)", format_size(precomp_size as i64), precomp_time.as_secs_f64());
+    println!("    compressed: {} ({:.1}s)", format_size(comp_size as i64), compress_time.as_secs_f64());
+    println!("    ratio:     {}% of raw", ratio);
+    println!("    total:     {:.1}s", total_time.as_secs_f64());
+    println!();
     println!("  manifest: {}", gim_path.display());
 
     Ok(())
