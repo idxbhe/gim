@@ -1,156 +1,149 @@
 # ──────────────────────────────────────────────────────────────────────
 # gim compression profile: zstd
 # ──────────────────────────────────────────────────────────────────────
-# zstd is the best general-purpose precompression codec. It offers
-# excellent compression ratio with very fast decompression speed.
-# Recommended for most games.
+# ZStandard — best general-purpose codec with excellent ratio and
+# fast decompression. Recommended for most games.
 #
 # This file is also a TEMPLATE for creating custom profiles.
-# Copy it, modify values, and save as <name>.gimprofile in this folder.
-# Then use: gim repack <game> --profile <name>
+# Copy it, modify values, save as <name>.gimprofile.
+# Use: gim repack <game> --profile <name>
+#
+# See xtool/MANUAL.md for complete xtool documentation.
 
 name = "zstd"
 description = "ZStandard — best general-purpose, good ratio + fast decode"
 
-# ── Codecs ────────────────────────────────────────────────────────────
-# Codecs to use for precompression. Multiple codecs separated by "+".
-# xtool scans for compressed streams matching these codecs and
-# recompresses them so the outer compression works better.
-#
-# Available codecs:
-#   zlib       — Deflate/ZIP streams (.zip, .pak, .upk, .bik, .dds)
-#                Level range: 1-9
-#   zstd       — ZStandard streams (modern games, Epic/Unreal)
-#                Level range: 1-22
-#   lz4        — LZ4 streams (some game engines)
-#                Level range: 1-12
-#   lzo        — LZO streams (rare, legacy)
-#                Level range: N/A
-#   oodle      — Oodle streams (Unreal Engine, RAD Game Tools)
-#                Sub-codecs: kraken, mermaid, selkie, hydra, leviathan, lzna
-#                Level range: 1-8 (varies by sub-codec)
-#                Usage: "oodle" (all sub-codecs) or "kraken" (specific)
-#   preflate   — Advanced deflate scanner (catches what zlib misses)
-#                Level range: N/A (no level parameter)
-#   reflate    — Re-compresses deflate streams at max level
-#                Level range: N/A (no level parameter)
-#                WARNING: Slow decode, not recommended for fast unpack
-#
-# Examples:
-#   codecs = "zstd"
-#   codecs = "zstd+preflate"
-#   codecs = "zstd+preflate+kraken"
-#   codecs = "lz4+oodle"
+# ══════════════════════════════════════════════════════════════════════
+# LAYER 1: PRECOMPRESSION
+# Scan data for compressed streams (zlib, zstd, oodle, etc.) and
+# inflate them so Layer 2 can compress more effectively.
+# ══════════════════════════════════════════════════════════════════════
+
+# Codecs for stream scanning. Multiple separated by "+".
+# Available codecs (see MANUAL.md for full list):
+#   zlib       — Deflate/ZIP (1-9)
+#   zstd       — ZStandard (1-22)
+#   lz4/lz4hc  — LZ4 (1-12)
+#   lzo        — LZO (no level)
+#   kraken     — Oodle Kraken (1-8)
+#   mermaid    — Oodle Mermaid (1-8)
+#   selkie     — Oodle Selkie (1-8)
+#   hydra      — Oodle Hydra (1-8)
+#   preflate   — Advanced deflate (no level, backup for zlib)
+#   reflate    — Re-compress deflate (no level, slow decode)
+#   grittibanzli — Alternative deflate (no level, slow)
 codecs = "zstd+preflate"
 
-# ── Compression Level ─────────────────────────────────────────────────
-# Default compression level. Passed to xtool as :l<N> on each codec.
-# Higher = better ratio, slower encode. Does NOT affect decode speed.
-# Override with: gim repack <game> --level <N>
-#
-# Level ranges per codec:
-#   zstd:  1-22 (default: 10)
-#   zlib:  1-9  (default: 5)
-#   lz4:   1-12 (default: 6)
-#   oodle: 1-8  (default: 4)
-#   preflate/reflate: no level (ignored)
-#
-# When multiple codecs are used, level applies to all that support it.
-level = 10
+# Codec level for stream scanning. Appended as :l<N>.
+# Applies to all codecs that support levels.
+# zstd: 1-22, zlib: 1-9, lz4: 1-12, oodle: 1-8
+codec_level = 10
 
-# ── Chunk Size ────────────────────────────────────────────────────────
-# Size of data chunks xtool processes at a time.
-# Range: 4mb to 2gb
-# Larger chunks = better stream detection, but more memory per thread.
-# Recommended:
-#   16mb  — fast, low memory (good for testing)
-#   64mb  — balanced (good for most games)
-#   128mb — thorough (large game files)
-#   256mb — maximum detection (very high memory)
+# Chunk size for scanning. Range: 4mb-2gb.
+# Larger = better stream detection, more memory per thread.
 chunk_size = "64mb"
 
-# ── Threads ───────────────────────────────────────────────────────────
-# Number of CPU threads for xtool.
-# "0" = auto (total CPU threads - 1, leaves 1 for system)
-# Can be exact number or percentage:
-#   "4"      — exactly 4 threads
-#   "75p"    — 75% of available threads
-#   "100p-1" — all threads minus 1
-#   "100p-2" — all threads minus 2 (more system headroom)
-threads = "0"
-
-# ── Memory ────────────────────────────────────────────────────────────
-# Memory limit for xtool deduplication and processing.
-# "0" = auto (80% of system RAM)
-# Can be exact or percentage:
-#   "4096mb"   — 4 GB
-#   "8192mb"   — 8 GB
-#   "75p"      — 75% of system RAM
-#   "75p-600mb" — 75% of RAM minus 600 MB
-memory = "0"
-
-# ── Depth ─────────────────────────────────────────────────────────────
-# Precompression depth. How deep to search for streams within streams.
-# 0 = no depth search (fastest, default)
-# 1 = search one level deep (catches zip-in-zip, archive-in-archive)
-# 2+ = deeper search (very slow, rarely finds additional streams)
-#
-# When to use depth > 0:
-#   - Game packages that contain nested archives (.pak within .pak)
-#   - Compressed files that were re-compressed
-#   - Tradeoff: depth 1 roughly doubles repack time
+# Scan depth. 0=none, 1-10=stream-in-stream search.
+# 1 catches zip-in-zip. Higher = very slow.
 depth = 0
 
-# ── Stream Database ───────────────────────────────────────────────────
-# Enable xtool stream database for faster processing of repeated streams.
-# xtool caches processed streams and reuses them when the same stream
-# is found again. Especially useful for game data with many identical
-# textures, sounds, or models across files.
-#
-# true = enable (recommended for large games)
-# false = disable (default, simpler)
-#
-# Note: there is a small risk of hash collision (xtool docs mention this).
-# If you encounter restore issues, try disabling dbase.
+# Stream database. Caches processed streams for speed boost.
+# Small risk of hash collision (see MANUAL.md).
 dbase = true
 
-# ── Deduplication ─────────────────────────────────────────────────────
-# Enable stream deduplication. xtool finds identical compressed streams
-# and stores only one copy, replacing others with references.
-# Produces an additional .dedup file that must be present during decode.
-#
-# Empty string = disabled
-# Filename = enabled, the dedup database will be written to this file
-#
-# How it works:
-#   1. xtool finds stream A in file1.pak and file2.pak
-#   2. Only processes stream A once
-#   3. In file2.pak, inserts a reference to the stored stream A
-#   4. Result: smaller output, faster decode
-#
-# The .dedup file is shared across all data processed with the same
-# --dedup flag. For gim repack, all objects use the same dedup file.
+# Stream deduplication. Finds identical streams, stores once.
+# Filename for the dedup database file (must be present during decode).
+# Empty string = disabled.
 dedup = "dedup.bin"
 
-# ── Delta Threshold ───────────────────────────────────────────────────
-# Controls when streams that cannot be perfectly restored are discarded.
-# Some streams can't be reconstructed exactly — xtool uses xdelta to
-# store the difference. If the diff is too large, the stream is discarded
-# (stored as-is, uncompressed) to avoid negative ratio.
-#
-# "5p"  = 5% of stream size (xtool default, recommended)
-# "0"   = never discard (keep all, even imperfect — may increase size)
-# "100p" = always discard imperfect streams
-# "10p" = 10% threshold (more strict)
+# Dedup memory limit.
+# "0"=auto (75% RAM), or "4096mb", "75p", "75p-600mb"
+dedup_memory = "0"
+
+# Delta threshold for imperfect stream restoration.
+# Streams that can't be perfectly restored are compared with xdelta.
+# If diff > threshold, stream is discarded (stored as-is).
+# "5p"=5% (default), "0"=never discard, "100p"=always discard
 diff = "5p"
 
-# ── Low Memory Mode ───────────────────────────────────────────────────
-# Reduces memory usage at the cost of speed.
-# false = each thread gets its own chunk (default, faster)
-# true = only one chunk scanned at a time (slower, less memory)
-#
-# When to enable:
-#   - System with limited RAM (< 8GB)
-#   - Large chunk_size (256mb+) with many threads
-#   - Other applications running that need memory
+# Low memory mode. One chunk at a time (slower, less memory).
 low_memory = false
+
+# Skip stream verification (faster, risky — no CRC check).
+skip_verify = false
+
+# Full scan mode (more thorough, slower).
+full_scan = false
+
+# Optimize output for faster decode.
+optimize_decode = false
+
+# Prefetch cache. Pre-load data to memory for faster I/O.
+# "0mb"=disabled, or "256mb", "1gb"
+prefetch_cache = "0mb"
+
+# Recompress streams detected with another codec.
+# Empty = disabled. Example: "zstd:zlib" (recompress zstd as zlib)
+recompress = ""
+
+# Reassign detected streams to another codec.
+# Empty = disabled.
+reassign = ""
+
+# Extract streams to directory (debugging/analysis).
+# Empty = disabled.
+extract_dir = ""
+
+# ══════════════════════════════════════════════════════════════════════
+# LAYER 2: OUTPUT COMPRESSION
+# Compress the precompressed output. Without this, output may be
+# LARGER than input (streams are inflated).
+# ══════════════════════════════════════════════════════════════════════
+
+# Built-in fast LZMA2 compression level.
+# 0 = disabled (precompression only)
+# 1-10 = LZMA2 compression (needs FLZMA2DLL library)
+compression_level = 5
+
+# LZMA2 dictionary size. Empty = default per level.
+# Larger = better ratio, more memory. Example: "128mb"
+compression_dict = ""
+
+# LZMA2 high compression mode (better ratio, slower encode).
+compression_high = false
+
+# External compressor program. If set, overrides built-in LZMA2.
+# xtool pipes precompressed output to this program via stdin/stdout.
+# Use {stdin} and {stdout} as placeholders.
+# Examples:
+#   "7z a -txz -mx=9 {stdin} {stdout}"
+#   "flzma2 e {stdin} {stdout} -l5"
+external_compressor = ""
+
+# ══════════════════════════════════════════════════════════════════════
+# RESOURCE MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════
+
+# Thread count. "0"=auto (CPU-1).
+# Or exact: "4", percentage: "75p", expression: "100p-1"
+threads = "0"
+
+# Thread priority: "idle", "normal", "high", "timecritical"
+thread_priority = "normal"
+
+# ══════════════════════════════════════════════════════════════════════
+# CUSTOM LIBRARIES
+# Override default library filenames for codecs.
+# Empty = use default/auto-detect.
+# ══════════════════════════════════════════════════════════════════════
+
+lz4_library = ""
+zstd_library = ""
+oodle_library = ""
+
+# ══════════════════════════════════════════════════════════════════════
+# DEBUG
+# ══════════════════════════════════════════════════════════════════════
+
+# Verbose xtool output (shows detailed processing info).
+verbose = false

@@ -17,7 +17,7 @@ pub fn run(
     level: Option<u32>,
     snapshots: Option<Vec<String>>,
     threads: Option<usize>,
-    memory: Option<u64>,
+    _memory: Option<u64>,
     output: Option<PathBuf>,
     dry_run: bool,
     progress: &ProgressReporter,
@@ -144,7 +144,7 @@ pub fn run(
         f.sync_all()?;
     }
 
-    let encode_args = profile.xtool_encode_args(level, threads, memory);
+    let encode_args = profile.xtool_encode_args(level, threads);
     progress.phase_cancel();
     progress.phase_start("compressing objects", 0);
     xtool.encode(&temp_cat, &objects_file, &encode_args)?;
@@ -187,7 +187,7 @@ pub fn run(
         }),
         compression: GimCompressionInfo {
             profile: profile.name.clone(),
-            level: level.unwrap_or(profile.level),
+            level: level.unwrap_or(profile.codec_level),
             codecs: profile.codecs.split('+').map(|s| s.to_string()).collect(),
             chunk_size: profile.chunk_size.clone(),
             xtool_version: "0.7.9".to_string(),

@@ -1,26 +1,48 @@
 # ──────────────────────────────────────────────────────────────────────
 # gim compression profile: lz4
 # ──────────────────────────────────────────────────────────────────────
-# lz4 is the fastest precompression codec. Extremely fast encode and
-# decode, but lower compression ratio than zstd.
-# Good for: quick repacks, testing, or when unpack speed is critical.
+# LZ4 — fastest codec with extremely fast encode and decode.
+# Lower ratio than zstd but best unpack speed.
+# Good for: quick repacks, testing, speed-critical scenarios.
 #
-# See zstd.gimprofile for full documentation of all options.
+# See zstd.gimprofile for full parameter documentation.
+# See xtool/MANUAL.md for complete xtool documentation.
 
 name = "lz4"
 description = "LZ4 — fastest codec, lower ratio, extremely fast unpack"
 
+# Layer 1: Precompression
 codecs = "lz4+preflate"
-
-# lz4 level range: 1-12
-# 6 = mid-range, good balance of speed and ratio
-level = 6
-
+codec_level = 6
 chunk_size = "64mb"
-threads = "0"
-memory = "0"
 depth = 0
 dbase = true
 dedup = "dedup.bin"
+dedup_memory = "0"
 diff = "5p"
 low_memory = false
+skip_verify = false
+full_scan = false
+optimize_decode = false
+prefetch_cache = "0mb"
+recompress = ""
+reassign = ""
+extract_dir = ""
+
+# Layer 2: Output compression
+compression_level = 3
+compression_dict = ""
+compression_high = false
+external_compressor = ""
+
+# Resource
+threads = "0"
+thread_priority = "normal"
+
+# Custom libraries
+lz4_library = ""
+zstd_library = ""
+oodle_library = ""
+
+# Debug
+verbose = false

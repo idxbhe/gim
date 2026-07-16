@@ -1,34 +1,51 @@
 # ──────────────────────────────────────────────────────────────────────
 # gim compression profile: oodle
 # ──────────────────────────────────────────────────────────────────────
-# oodle is the codec used by Unreal Engine and many AAA games.
-# Supports sub-codecs for specific stream types:
-#   kraken    — most common Oodle format
-#   mermaid   — faster than kraken, slightly lower ratio
-#   selkie    — fastest oodle, lowest ratio
-#   hydra     — combination of kraken + mermaid
-#   leviathan — highest ratio oodle, slowest
-#   lzna      — legacy oodle format
-#
+# Oodle (kraken+mermaid) — codec used by Unreal Engine and AAA games.
 # Best for: Unreal Engine games, Epic Games Store titles.
-# See zstd.gimprofile for full documentation of all options.
+# Requires oo2core_*.dll from the game directory.
+#
+# See zstd.gimprofile for full parameter documentation.
+# See xtool/MANUAL.md for complete xtool documentation.
 
 name = "oodle"
 description = "Oodle (kraken+mermaid) — best for Unreal Engine games"
 
-# Use kraken + mermaid to cover most oodle stream variants.
-# Add "+zstd" to also catch zstd streams if the game uses mixed codecs.
+# Layer 1: Precompression
+# kraken+mermaid covers most oodle stream variants.
+# Add "+zstd" if the game uses mixed codecs.
 codecs = "kraken+mermaid+preflate"
-
-# oodle level range: 1-8
-# 4 = mid-range (xtool docs recommend l4 for kraken)
-level = 4
-
+codec_level = 4
 chunk_size = "64mb"
-threads = "0"
-memory = "0"
 depth = 0
 dbase = true
 dedup = "dedup.bin"
+dedup_memory = "0"
 diff = "5p"
 low_memory = false
+skip_verify = false
+full_scan = false
+optimize_decode = false
+prefetch_cache = "0mb"
+recompress = ""
+reassign = ""
+extract_dir = ""
+
+# Layer 2: Output compression
+compression_level = 5
+compression_dict = ""
+compression_high = false
+external_compressor = ""
+
+# Resource
+threads = "0"
+thread_priority = "normal"
+
+# Custom libraries
+# Leave empty to auto-detect oo2core_*.dll from game directory.
+lz4_library = ""
+zstd_library = ""
+oodle_library = ""
+
+# Debug
+verbose = false
