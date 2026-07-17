@@ -13,12 +13,67 @@
 //! Auto-disables when stderr is not a TTY or `--no-progress` /
 //! `GIM_NO_PROGRESS` is set. Colors auto-disable when `NO_COLOR` env
 //! var is set.
+//!
+//! ## Windows ANSI Support
+//!
+//! On Windows 10+, ANSI escape codes require Virtual Terminal (VT)
+//! mode to be explicitly enabled on the console handle. This module
+//! calls `enable_windows_ansi()` once during initialization to ensure
+//! colors render correctly instead of showing raw codes like `[32m`.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+// ── Windows VT mode enable ────────────────────────────────────────
+// Windows 10+ supports ANSI escape codes but requires Virtual Terminal
+// processing to be enabled via SetConsoleMode. We call this once at
+// startup so raw `\x1b[...m` sequences render as colors, not garbage.
+//
+// On non-Windows platforms this is a no-op (compiled out).
+
+#[cfg(target_os = "windows")]
+fn enable_windows_ansi() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+
+    if ENABLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed).is_err() {
+        return; // Already attempted
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(nstdhandle: i32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(hconsole_handle: *mut std::ffi::c_void, lpmode: *mut u32) -> i32;
+        fn SetConsoleMode(hconsole_handle: *mut std::ffi::c_void, dwmode: u32) -> i32;
+    }
+
+    const STD_ERROR_HANDLE: i32 = -12i32;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    unsafe {
+        let handle = GetStdHandle(STD_ERROR_HANDLE);
+        if handle.is_null() {
+            return;
+        }
+
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return; // Not a console (e.g., redirected to file/pipe)
+        }
+
+        // Enable VT processing bit while preserving existing modes.
+        let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enable_windows_ansi() {
+    // No-op on Unix/macOS — terminals support ANSI natively.
+}
 
 // ── ANSI color codes ────────────────────────────────────────────────
 // We use raw ANSI codes instead of the `colored` crate for the
@@ -65,6 +120,10 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     pub fn new(enabled: bool) -> Self {
+        // Enable Windows VT mode so ANSI escape codes render as colors
+        // instead of raw text like `[32m`. No-op on non-Windows.
+        enable_windows_ansi();
+
         // Colors enabled when: progress enabled AND NO_COLOR not set.
         let use_color = enabled && std::env::var_os("NO_COLOR").is_none();
         Self {
