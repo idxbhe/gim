@@ -26,6 +26,10 @@ pub enum GError {
     #[error("unpack error: {0}")] Unpack(String),
     #[error("xtool error: {0}")] Xtool(String),
     #[error("invalid manifest: {0}")] InvalidManifest(String),
+    #[error("compaction cancelled by user")] CompactCancelled,
+    #[error("compaction error: {0}")] Compact(String),
+    #[error("a compaction is already running for game \"{0}\" (lockfile: {1})")] CompactRunning(String, PathBuf),
+    #[error("operation requires Windows (only supported on Windows)")] NotSupportedPlatform,
     #[error("sqlite error: {0}")] Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")] Io(#[from] io::Error),
     #[error("path error: {0}")] Path(String),
@@ -48,7 +52,8 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::CannotDeleteCurrentBranch(_) | GError::CannotDeleteMainBranch
         | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _)
         | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _)
-        | GError::InvalidManifest(_) => 2,
+        | GError::InvalidManifest(_) | GError::CompactCancelled
+        | GError::CompactRunning(_, _) | GError::NotSupportedPlatform => 2,
         _ => 1,
     }
 }
