@@ -8,8 +8,12 @@
 //! Supported keys:
 //! - `hash.algorithm` — `xxhash` (default) | `blake3`
 //! - `hash.threads` — `0` (auto, default) | N
+//! - `hash.parallel` — `true` (default) | `false`
 //! - `snapshot.auto_gc` — `false` (default) | `true`
 //! - `snapshot.lock_retry` — `3` (default)
+//! - `compact.algorithm` — `lzx` (default) | `xpress4k` | `xpress8k` | `xpress16k` | `ntfs` | `none`
+//! - `compact.threads` — `0` (auto, default) | N
+//! - `compact.auto_pause` — `true` (default) | `false`
 //!
 //! When `hash.algorithm` is changed on a game that already has
 //! snapshots, the user is prompted to confirm a full rehash.
@@ -17,6 +21,7 @@
 use crate::config::Paths;
 use crate::error::{GError, GResult};
 use crate::hashing::HashAlgorithm;
+use crate::compact::CompactAlgorithm;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -28,6 +33,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("hash.parallel", "true"),
     ("snapshot.auto_gc", "false"),
     ("snapshot.lock_retry", "3"),
+    ("compact.algorithm", "lzx"),
+    ("compact.threads", "0"),
+    ("compact.auto_pause", "true"),
 ];
 
 /// A config store — holds key/value pairs parsed from a config file.
@@ -105,6 +113,21 @@ impl GimConfig {
     /// Lock retry count.
     pub fn lock_retry(&self) -> u32 {
         self.get_parsed("snapshot.lock_retry").unwrap_or(3)
+    }
+
+    /// Get the compact algorithm for this config.
+    pub fn compact_algorithm(&self) -> GResult<CompactAlgorithm> {
+        self.get("compact.algorithm").parse()
+    }
+
+    /// Get the compact thread count (0 = auto).
+    pub fn compact_threads(&self) -> usize {
+        self.get_parsed("compact.threads").unwrap_or(0)
+    }
+
+    /// Whether to auto-pause background compaction when a tracked game is running.
+    pub fn compact_auto_pause(&self) -> bool {
+        self.get("compact.auto_pause") == "true"
     }
 
     /// Set a key/value. Does NOT write to disk — call `save()` for that.
@@ -224,6 +247,24 @@ pub fn validate_value(key: &str, value: &str) -> GResult<()> {
             )))?;
             Ok(())
         }
+        "compact.algorithm" => {
+            value.parse::<CompactAlgorithm>()?;
+            Ok(())
+        }
+        "compact.threads" => {
+            value.parse::<usize>().map_err(|_| GError::Other(format!(
+                "invalid compact.threads value \"{value}\" (expected non-negative integer)"
+            )))?;
+            Ok(())
+        }
+        "compact.auto_pause" => {
+            if value != "true" && value != "false" {
+                return Err(GError::Other(format!(
+                    "invalid compact.auto_pause value \"{value}\" (expected true|false)"
+                )));
+            }
+            Ok(())
+        }
         _ => Ok(()), // unknown keys pass through
     }
 }
@@ -239,15 +280,21 @@ mod tests {
         assert_eq!(cfg.get("hash.threads"), "0");
         assert_eq!(cfg.get("snapshot.auto_gc"), "false");
         assert_eq!(cfg.get("snapshot.lock_retry"), "3");
+        assert_eq!(cfg.get("compact.algorithm"), "lzx");
+        assert_eq!(cfg.get("compact.threads"), "0");
+        assert_eq!(cfg.get("compact.auto_pause"), "true");
     }
 
     #[test]
     fn override_works() {
         let mut entries = HashMap::new();
         entries.insert("hash.algorithm".to_string(), "blake3".to_string());
+        entries.insert("compact.algorithm".to_string(), "ntfs".to_string());
         let cfg = GimConfig { entries, source_path: PathBuf::new() };
         assert_eq!(cfg.get("hash.algorithm"), "blake3");
         assert_eq!(cfg.hash_algorithm().unwrap(), HashAlgorithm::Blake3);
+        assert_eq!(cfg.get("compact.algorithm"), "ntfs");
+        assert_eq!(cfg.compact_algorithm().unwrap(), CompactAlgorithm::Ntfs);
     }
 
     #[test]
@@ -255,6 +302,9 @@ mod tests {
         assert!(validate_key("hash.algorithm").is_ok());
         assert!(validate_key("hash.threads").is_ok());
         assert!(validate_key("snapshot.auto_gc").is_ok());
+        assert!(validate_key("compact.algorithm").is_ok());
+        assert!(validate_key("compact.threads").is_ok());
+        assert!(validate_key("compact.auto_pause").is_ok());
         assert!(validate_key("unknown.key").is_err());
     }
 
@@ -267,5 +317,12 @@ mod tests {
         assert!(validate_value("hash.threads", "abc").is_err());
         assert!(validate_value("snapshot.auto_gc", "true").is_ok());
         assert!(validate_value("snapshot.auto_gc", "maybe").is_err());
+        assert!(validate_value("compact.algorithm", "lzx").is_ok());
+        assert!(validate_value("compact.algorithm", "ntfs").is_ok());
+        assert!(validate_value("compact.algorithm", "gzip").is_err());
+        assert!(validate_value("compact.threads", "4").is_ok());
+        assert!(validate_value("compact.threads", "abc").is_err());
+        assert!(validate_value("compact.auto_pause", "true").is_ok());
+        assert!(validate_value("compact.auto_pause", "maybe").is_err());
     }
 }

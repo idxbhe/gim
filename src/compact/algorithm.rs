@@ -18,6 +18,7 @@
 //! are Windows-only filesystem features.
 
 use crate::error::{GError, GResult};
+use std::str::FromStr;
 
 /// Which Windows compression mechanism backs an algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,13 @@ pub enum CompactAlgorithm {
 impl Default for CompactAlgorithm {
     fn default() -> Self {
         Self::Lzx
+    }
+}
+
+impl FromStr for CompactAlgorithm {
+    type Err = GError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 

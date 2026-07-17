@@ -220,6 +220,9 @@ fn config_value_description(key: &str, _current_val: &str) -> String {
         "hash.parallel" => "true = parallel hashing (SSD) | false = sequential (HDD)".to_string(),
         "snapshot.auto_gc" => "true = auto gc after snap | false = manual gc only".to_string(),
         "snapshot.lock_retry" => "number of retries on locked files (0 = no retry)".to_string(),
+        "compact.algorithm" => "options: lzx (best ratio) | xpress4k | xpress8k | xpress16k | ntfs (LZNT1) | none".to_string(),
+        "compact.threads" => "0 = auto (use all CPUs) | N = exact thread count".to_string(),
+        "compact.auto_pause" => "true = pause background compact when a tracked game is running | false = never pause".to_string(),
         _ => String::new(),
     }
 }

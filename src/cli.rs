@@ -135,4 +135,42 @@ pub enum Command {
         #[arg(long = "dry-run")]
         dry_run: bool,
     },
+    /// Compress a game folder or snapshot data folder to save disk space.
+    /// Uses Windows NTFS or WOF (LZX/XPRESS) compression via direct API.
+    /// The folder stays readable transparently after compression.
+    Compact {
+        /// Game alias.
+        alias: String,
+        /// Compression algorithm: lzx (default), xpress4k, xpress8k, xpress16k, ntfs, none.
+        /// Overrides compact.algorithm config key.
+        #[arg(long, short = 'a')]
+        algorithm: Option<String>,
+        /// Which folder to compress: game (default), data, both.
+        #[arg(long, value_name = "FOLDER")]
+        target: Option<String>,
+        /// Decompress (undo any existing compression).
+        #[arg(long)]
+        decompress: bool,
+        /// Skip yes/no confirmation prompt.
+        #[arg(long)]
+        confirm: bool,
+        /// Proceed even if estimated savings are low (<5%).
+        #[arg(long)]
+        force: bool,
+        /// Number of threads (default: auto, from compact.threads config).
+        #[arg(long, short = 't')]
+        threads: Option<usize>,
+        /// Exclude files matching patterns (gitignore syntax). Repeatable.
+        #[arg(long)]
+        exclude: Option<Vec<String>>,
+        /// Run compaction in background. Auto-pauses when a tracked game starts.
+        #[arg(long)]
+        background: bool,
+        /// Show status of a running background compaction.
+        #[arg(long)]
+        status: bool,
+        /// Dry run — scan and show estimate only, no changes.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
 }

@@ -279,6 +279,14 @@ impl ProgressReporter {
     pub fn delete_start(&self, total: usize) { self.phase_start("deleting", total); }
     pub fn delete_tick(&self) { self.phase_tick(); }
     pub fn delete_done(&self, _count: u64) { self.phase_done("deleted"); }
+
+    pub fn compact_start(&self, total: usize) { self.phase_start("compacting", total); }
+    pub fn compact_tick(&self) { self.phase_tick(); }
+    pub fn compact_done(&self, _count: u64) { self.phase_done("compacted"); }
+
+    pub fn decompress_start(&self, total: usize) { self.phase_start("decompressing", total); }
+    pub fn decompress_tick(&self) { self.phase_tick(); }
+    pub fn decompress_done(&self, _count: u64) { self.phase_done("decompressed"); }
 }
 
 impl Drop for ProgressReporter {
@@ -360,6 +368,8 @@ mod tests {
         r.store_start(10); r.store_tick(); r.store_done(0);
         r.scan_start(); r.scan_tick(); r.scan_done(0);
         r.delete_start(5); r.delete_tick(); r.delete_done(0);
+        r.compact_start(5); r.compact_tick(); r.compact_done(0);
+        r.decompress_start(3); r.decompress_tick(); r.decompress_done(0);
     }
 
     #[test]

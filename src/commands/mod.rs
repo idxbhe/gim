@@ -1,5 +1,6 @@
 pub mod add;
 pub mod branch;
+pub mod compact;
 pub mod config_cmd;
 pub mod delete;
 pub mod diff;
@@ -58,12 +59,14 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Repack { alias, profile, list_profiles, level, snapshots, threads, output, dry_run } => repack::run(c, alias.clone(), profile.clone(), *list_profiles, *level, snapshots.clone(), *threads, output.clone(), *dry_run, p),
         Command::Unpack { gim_file, output_dir, snapshot, track, threads, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, false, false, p),
         Command::Install { gim_file, output_dir, snapshot, track, threads, interactive, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, true, *interactive, p),
+        Command::Compact { alias, algorithm, target, decompress, confirm, force, threads, exclude, background, status, dry_run } => compact::run(c, alias.clone(), algorithm.clone(), target.clone(), *decompress, *confirm, *force, *threads, exclude.clone().unwrap_or_default(), *background, *status, *dry_run, p),
     }
 }
 
 fn threads_from_command(cmd: &Command) -> Option<usize> {
     match cmd {
-        Command::Snap { threads, .. } | Command::Restore { threads, .. } | Command::Status { threads, .. } => *threads,
+        Command::Snap { threads, .. } | Command::Restore { threads, .. } | Command::Status { threads, .. }
+        | Command::Compact { threads, .. } => *threads,
         _ => None,
     }
 }
