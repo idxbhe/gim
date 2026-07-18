@@ -28,7 +28,7 @@
 use crate::error::{GError, GResult};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Control codes ───────────────────────────────────────────────────────
@@ -64,29 +64,264 @@ const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_
 // ── WOF availability cache ──────────────────────────────────────────────
 // Once we detect that WOF is unavailable on a volume (ERROR_INVALID_FUNCTION),
 // we cache this so we don't repeat the failing DeviceIoControl for every file.
-// Tri-state: false = not yet tested, true = known unavailable.
 static WOF_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 /// Win32 error code for "incorrect function" — indicates the WOF driver is
 /// not present or not loaded on this system / volume.
 const ERROR_INVALID_FUNCTION: u32 = 1;
 
-/// Check whether the WOF driver appears to be available.
+// ── WOF driver status ──────────────────────────────────────────────────
+
+/// Result of probing the WOF driver availability on the system.
 ///
-/// Returns `Ok(())` if WOF is available (or not yet tested), or
+/// Used by the `gim compact` command to inform the user about why WOF
+/// compression is unavailable and what (if anything) can be done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WofDriverStatus {
+    /// WOF driver appears to be available and the service is configured
+    /// to start (file exists, registry `Start` != 4).
+    Available,
+    /// WOF driver file (`wof.sys`) exists on disk but the service is
+    /// disabled (registry `Start` = 4). The user can enable it via
+    /// [`enable_wof_driver`] and then restart.
+    Disabled,
+    /// WOF driver file (`wof.sys`) was not found in
+    /// `%SystemRoot%\System32\drivers\`. WOF compression is not
+    /// possible on this system.
+    NotInstalled,
+}
+
+/// Resolve the expected path of `wof.sys` on this system.
+///
+/// Uses the `%SystemRoot%` environment variable (falling back to
+/// `C:\Windows` if unset) to construct
+/// `<SystemRoot>\System32\drivers\wof.sys`.
+#[cfg(target_os = "windows")]
+pub fn wof_sys_path() -> PathBuf {
+    let sys_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    sys_root.join(r"System32\drivers\wof.sys")
+}
+
+/// Probe the WOF driver availability on this system.
+///
+/// 1. Checks whether `wof.sys` exists in `%SystemRoot%\System32\drivers\`.
+/// 2. If it exists, reads the `Start` DWORD from the service registry key
+///    `HKLM\SYSTEM\CurrentControlSet\Services\wof`.
+///    - `Start == 4` → service is disabled → returns [`WofDriverStatus::Disabled`]
+///    - Any other value → service is enabled (or at least not disabled)
+///      → returns [`WofDriverStatus::Available`]
+/// 3. If `wof.sys` does not exist → returns [`WofDriverStatus::NotInstalled`].
+///
+/// On non-Windows platforms, always returns [`WofDriverStatus::NotInstalled`].
+pub fn probe_wof_driver() -> WofDriverStatus {
+    #[cfg(target_os = "windows")]
+    {
+        let driver_path = wof_sys_path();
+
+        if !driver_path.exists() {
+            return WofDriverStatus::NotInstalled;
+        }
+
+        // wof.sys exists — check the service registry key.
+        match read_wof_service_start() {
+            Some(4) => WofDriverStatus::Disabled,
+            Some(_) => WofDriverStatus::Available,
+            None => {
+                // Could not read the registry key. The file exists but we
+                // can't determine the service state. Treat as disabled
+                // since the driver clearly isn't loaded (we wouldn't be
+                // probing if FSCTL_SET_EXTERNAL_BACKING had succeeded).
+                WofDriverStatus::Disabled
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        WofDriverStatus::NotInstalled
+    }
+}
+
+/// Read the `Start` DWORD from the WOF service registry key.
+///
+/// Returns `None` if the key does not exist or cannot be read.
+#[cfg(target_os = "windows")]
+fn read_wof_service_start() -> Option<u32> {
+    let subkey = str_to_wide(r"SYSTEM\CurrentControlSet\Services\wof");
+    let value_name = str_to_wide("Start");
+
+    let mut hkey: isize = 0;
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return None;
+    }
+
+    let mut dtype: u32 = 0;
+    let mut data: [u8; 4] = [0; 4];
+    let mut data_size: u32 = 4;
+
+    let result = unsafe {
+        RegQueryValueExW(
+            hkey,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut dtype,
+            data.as_mut_ptr(),
+            &mut data_size,
+        )
+    };
+
+    unsafe { let _ = RegCloseKey(hkey); }
+
+    if result != ERROR_SUCCESS || dtype != REG_DWORD || data_size != 4 {
+        return None;
+    }
+
+    Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Attempt to enable the WOF driver by setting the service `Start` value
+/// in the Windows registry.
+///
+/// This sets `HKLM\SYSTEM\CurrentControlSet\Services\wof\Start` to `0`
+/// (boot start), which causes the WOF driver to load during boot.
+///
+/// **This requires Administrator privileges.** If the current process
+/// does not have sufficient rights, this will return an error.
+///
+/// After successfully enabling the driver, the system **must be restarted**
+/// for the change to take effect.
+pub fn enable_wof_driver() -> GResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let subkey = str_to_wide(r"SYSTEM\CurrentControlSet\Services\wof");
+        let value_name = str_to_wide("Start");
+
+        let mut hkey: isize = 0;
+        let result = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                subkey.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+        };
+        if result != ERROR_SUCCESS {
+            return Err(GError::WofNotAvailable(
+                format!("failed to open WOF service registry key (Win32 error {result}). \
+                         Make sure you are running as Administrator.")
+            ));
+        }
+
+        // Set Start = 0 (boot start — driver loads during boot).
+        let start_value: u32 = 0;
+        let data = start_value.to_le_bytes();
+        let result = unsafe {
+            RegSetValueExW(
+                hkey,
+                value_name.as_ptr(),
+                0,
+                REG_DWORD,
+                data.as_ptr(),
+                4,
+            )
+        };
+
+        unsafe { let _ = RegCloseKey(hkey); }
+
+        if result != ERROR_SUCCESS {
+            return Err(GError::WofNotAvailable(
+                format!("failed to set WOF service Start value (Win32 error {result}). \
+                         Make sure you are running as Administrator.")
+            ));
+        }
+
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(GError::NotSupportedPlatform)
+    }
+}
+
+// ── Registry FFI ───────────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        hkey: isize,
+        lpsubkey: *const u16,
+        uloptions: u32,
+        samdesired: u32,
+        phkresult: *mut isize,
+    ) -> i32;
+
+    fn RegQueryValueExW(
+        hkey: isize,
+        lpvaluename: *const u16,
+        lpreserved: *mut u32,
+        lptype: *mut u32,
+        lpdata: *mut u8,
+        lpcbdata: *mut u32,
+    ) -> i32;
+
+    fn RegSetValueExW(
+        hkey: isize,
+        lpvaluename: *const u16,
+        reserved: u32,
+        dwtype: u32,
+        lpdata: *const u8,
+        cbdata: u32,
+    ) -> i32;
+
+    fn RegCloseKey(hkey: isize) -> i32;
+}
+
+/// `HKEY_LOCAL_MACHINE` predefined registry key handle.
+const HKEY_LOCAL_MACHINE: isize = 0x80000002isize;
+const KEY_READ: u32 = 0x20019;
+const KEY_SET_VALUE: u32 = 0x0002;
+const REG_DWORD: u32 = 4;
+const ERROR_SUCCESS: i32 = 0;
+
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/// Convert a Rust string to a NUL-terminated UTF-16 wide string.
+fn str_to_wide(s: &str) -> Vec<u16> {
+    let mut v: Vec<u16> = OsStr::new(s).encode_wide().collect();
+    v.push(0);
+    v
+}
+
+// ── WOF availability check ─────────────────────────────────────────────
+
+/// Check whether the WOF driver appears to be available based on
+/// previously observed `DeviceIoControl` results.
+///
+/// Returns `Ok(())` if no WOF failure has been observed, or
 /// `Err(GError::WofNotAvailable)` if a previous `FSCTL_SET_EXTERNAL_BACKING`
-/// call failed with `ERROR_INVALID_FUNCTION`, indicating the WOF driver is
-/// not loaded on this system.
+/// call failed with `ERROR_INVALID_FUNCTION`.
 ///
-/// On non-Windows platforms, always returns `Err(GError::NotSupportedPlatform)`.
+/// For a thorough pre-flight check, use [`probe_wof_driver`] instead.
 pub fn check_wof_available() -> GResult<()> {
     #[cfg(target_os = "windows")]
     {
         if WOF_UNAVAILABLE.load(Ordering::Relaxed) {
             return Err(GError::WofNotAvailable(
                 "the WOF driver (wof.sys) is not loaded on this system. \
-                 WOF compression (LZX/XPRESS) requires Windows 10+ with the \
-                 WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+                 WOF compression (LZX/XPRESS) requires the WOF driver to be \
+                 installed and enabled.".into(),
             ));
         }
         Ok(())
@@ -107,6 +342,8 @@ pub fn reset_wof_availability() {
     WOF_UNAVAILABLE.store(false, Ordering::Relaxed);
 }
 
+// ── File compression structures ────────────────────────────────────────
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct WofExternalInfo {
@@ -121,6 +358,8 @@ struct FileProviderExternalInfo1 {
     algorithm: u32,
     flags: u32,
 }
+
+// ── Win32 FFI (kernel32) ───────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
@@ -225,8 +464,9 @@ fn build_backing_payload(algorithm: u32) -> [u8; 16] {
 /// constants). The file remains readable normally.
 ///
 /// If the WOF driver is not available (e.g., `wof.sys` not loaded), this
-/// returns [`GError::WofNotAvailable`] instead of a generic error, so
-/// callers can fall back to NTFS compression.
+/// returns [`GError::WofNotAvailable`]. Callers should use
+/// [`probe_wof_driver`] beforehand to check availability and provide
+/// actionable guidance to the user.
 pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
     #[cfg(target_os = "windows")]
     {
@@ -235,8 +475,8 @@ pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
         if WOF_UNAVAILABLE.load(Ordering::Relaxed) {
             return Err(GError::WofNotAvailable(
                 "the WOF driver (wof.sys) is not loaded on this system. \
-                 WOF compression (LZX/XPRESS) requires Windows 10+ with the \
-                 WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+                 WOF compression (LZX/XPRESS) requires the WOF driver to be \
+                 installed and enabled.".into(),
             ));
         }
 
@@ -266,8 +506,8 @@ pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
                 mark_wof_unavailable();
                 return Err(GError::WofNotAvailable(
                     "the WOF driver (wof.sys) is not loaded on this system. \
-                     WOF compression (LZX/XPRESS) requires Windows 10+ with the \
-                     WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+                     WOF compression (LZX/XPRESS) requires the WOF driver to be \
+                     installed and enabled.".into(),
                 ));
             }
             return Err(last_error("DeviceIoControl(FSCTL_SET_EXTERNAL_BACKING)"));
@@ -425,5 +665,24 @@ mod tests {
     fn reset_wof_availability_clears_flag() {
         // Ensure the reset function works (it manipulates a static).
         reset_wof_availability();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn probe_returns_not_installed_on_non_windows() {
+        assert_eq!(probe_wof_driver(), WofDriverStatus::NotInstalled);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn enable_returns_not_supported_on_non_windows() {
+        assert!(matches!(enable_wof_driver(), Err(GError::NotSupportedPlatform)));
+    }
+
+    #[test]
+    fn str_to_wide_is_nul_terminated() {
+        let w = str_to_wide("hello");
+        assert_eq!(*w.last().unwrap(), 0);
+        assert_eq!(w.len(), 6); // 5 chars + NUL
     }
 }

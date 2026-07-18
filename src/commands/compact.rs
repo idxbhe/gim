@@ -5,16 +5,17 @@
 //! 2. Validate game exists; if `--status`, print background state and exit.
 //! 3. Scan target folder → estimate savings.
 //! 4. Print summary (colorized table).
-//! 5. Prompt yes/no (unless `--confirm` or `--dry-run`).
-//! 6. Execute (foreground with progress bar, or `--background` worker).
-//! 7. Print final results.
+//! 5. WOF availability check (if using a WOF algorithm).
+//! 6. Prompt yes/no (unless `--confirm` or `--dry-run`).
+//! 7. Execute (foreground with progress bar, or `--background` worker).
+//! 8. Print final results.
 
 use crate::compact::{
     check_running_tracked, compress_file, decompress_file,
-    scan, summarize, CompactAlgorithm, CompactOptions, CompactPhase, CompactState,
-    Estimate, FileKind, TargetFolder,
+    scan, summarize, CompactAlgorithm, CompactMode, CompactOptions, CompactPhase, CompactState,
+    Estimate, FileKind, TargetFolder, WofDriverStatus,
     lock_file_path, state_file_path,
-    check_wof_available,
+    enable_wof_driver, probe_wof_driver,
 };
 use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::GamesDb;
@@ -104,7 +105,69 @@ pub fn run(
     // ── 6. Print summary ─────────────────────────────────────────────
     print_estimate(c, &estimate, &opts, &game.game_dir, &alias);
 
-    // ── 7. Prompt confirmation ───────────────────────────────────────
+    // ── 7. WOF availability check ────────────────────────────────────
+    // If the user requested a WOF algorithm (LZX/XPRESS) but the WOF
+    // driver is not available, inform them and offer to fix it.
+    // We do NOT fall back to another algorithm.
+    if !opts.algorithm.is_decompress() && opts.algorithm.mode() == CompactMode::Wof {
+        let status = probe_wof_driver();
+        match status {
+            WofDriverStatus::Available => {
+                // WOF driver is present and enabled — proceed normally.
+            }
+            WofDriverStatus::Disabled => {
+                println!();
+                println!("  {} WOF (Windows Overlay Filter) is disabled on this system.",
+                         c.yellow("⚠"));
+                println!("  The driver file exists but the WOF service is not active.");
+                println!("  This is likely because the service Start type is set to \"Disabled\"");
+                println!("  in the Windows registry.");
+                println!();
+                print!("  Enable the WOF driver? (requires Administrator privileges + restart) [y/N] ");
+                io::stdout().flush()?;
+                let mut enable_input = String::new();
+                io::stdin().lock().read_line(&mut enable_input)?;
+                if enable_input.trim().eq_ignore_ascii_case("y") {
+                    match enable_wof_driver() {
+                        Ok(()) => {
+                            println!();
+                            println!("  {} WOF driver has been enabled in the registry.",
+                                     c.green("✓"));
+                            println!("  {} Please restart your computer for the change to take effect,",
+                                     c.yellow("important:"));
+                            println!("  {} then run `gim compact {}` again.",
+                                     c.dim(""), alias);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            println!();
+                            println!("  {} Failed to enable WOF driver: {}", c.red("error:"), e);
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    println!("  compaction cancelled — WOF driver is required for {} compression.",
+                             opts.algorithm.label());
+                    return Err(GError::CompactCancelled);
+                }
+            }
+            WofDriverStatus::NotInstalled => {
+                println!();
+                println!("  {} WOF (Windows Overlay Filter) is not available on this system.",
+                         c.red("✗"));
+                println!("  The driver file (wof.sys) was not found in the expected location.");
+                println!("  WOF compression ({}) cannot be used without this driver.",
+                         opts.algorithm.label());
+                println!();
+                println!("  This operation is not possible on this system.");
+                return Err(GError::WofNotAvailable(
+                    "wof.sys driver not found — WOF compression is not available on this system".into(),
+                ));
+            }
+        }
+    }
+
+    // ── 8. Prompt confirmation ───────────────────────────────────────
     if !opts.confirm && !opts.dry_run {
         if estimate.candidate_files == 0 {
             println!();
@@ -135,23 +198,10 @@ pub fn run(
         return Ok(());
     }
 
-    // ── 8. Execute ───────────────────────────────────────────────────
+    // ── 9. Execute ───────────────────────────────────────────────────
     if opts.background {
         return spawn_background(c, &paths, &alias, opts.clone(),
                                  all_files, estimate, auto_pause);
-    }
-
-    // ── 8a. Early WOF availability check ──────────────────────────────
-    // If the user requested a WOF algorithm (LZX/XPRESS) but the WOF
-    // driver is not available, warn them now that we'll fall back to
-    // NTFS LZNT1. This avoids processing all files with a failing API.
-    if !opts.algorithm.is_decompress() && opts.algorithm.mode() == crate::compact::CompactMode::Wof {
-        if let Err(GError::WofNotAvailable(msg)) = check_wof_available() {
-            eprintln!("  {} WOF not available: {}", c.yellow("warning:"), msg);
-            eprintln!("  {} falling back to NTFS LZNT1 compression (lower ratio, but works everywhere)",
-                       c.yellow("warning:"));
-            eprintln!();
-        }
     }
 
     // Foreground execution
@@ -373,14 +423,6 @@ fn spawn_background(
     println!("  algorithm: {}", c.dim(opts.algorithm.label()));
     println!("  target:    {}", c.dim(opts.target.as_str()));
     println!("  auto-pause: {}", c.dim(if auto_pause { "enabled" } else { "disabled" }));
-
-    // Warn if WOF is not available (we'll fall back to NTFS at file level).
-    if !opts.algorithm.is_decompress() && opts.algorithm.mode() == crate::compact::CompactMode::Wof {
-        if let Err(GError::WofNotAvailable(_)) = check_wof_available() {
-            println!("  {} WOF not available — falling back to NTFS LZNT1",
-                     c.yellow("warning:"));
-        }
-    }
 
     // Spawn worker thread. It runs detached — the thread owns the LockGuard
     // (dropped on completion, releasing the lock).

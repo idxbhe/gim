@@ -20,7 +20,7 @@ pub mod wof;
 pub use algorithm::{CompactAlgorithm, CompactMode};
 pub use estimate::{Estimate, FileClass, FileKind, ScannedFile, SkipReason, scan, summarize};
 pub use game_running::{GameRunState, RunningGame, check_running_tracked, scan_against};
-pub use wof::{check_wof_available, reset_wof_availability};
+pub use wof::{WofDriverStatus, check_wof_available, enable_wof_driver, probe_wof_driver, reset_wof_availability};
 
 use crate::error::{GError, GResult};
 use std::path::{Path, PathBuf};
@@ -95,13 +95,10 @@ impl Default for CompactOptions {
 /// round-trips those at a loss). Errors from the Win32 call bubble up; the
 /// caller decides whether to treat them as fatal or collect them.
 ///
-/// # WOF fallback
-///
-/// When a WOF algorithm (LZX/XPRESS) is requested but the WOF driver is not
-/// available on the system, this function **automatically falls back to NTFS
-/// LZNT1 compression** instead of returning an error. This ensures compaction
-/// still works on systems without the WOF driver (e.g., some Windows Home
-/// editions or stripped installations).
+/// If the WOF driver is not available and a WOF algorithm is requested,
+/// the [`GError::WofNotAvailable`] error is returned. Callers should use
+/// [`probe_wof_driver`] before batch processing to check availability
+/// and provide actionable guidance to the user.
 pub fn compress_file(path: &Path, opts: &CompactOptions) -> GResult<()> {
     // Skip tiny files — overhead negates gains.
     if let Ok(m) = std::fs::symlink_metadata(path) {
@@ -110,44 +107,10 @@ pub fn compress_file(path: &Path, opts: &CompactOptions) -> GResult<()> {
 
     match opts.algorithm {
         CompactAlgorithm::Ntfs => ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_LZNT1),
-        CompactAlgorithm::Xpress4k => {
-            match wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS4K) {
-                Ok(()) => Ok(()),
-                Err(GError::WofNotAvailable(_)) => {
-                    // WOF driver not available — fall back to NTFS LZNT1
-                    ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_LZNT1)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        CompactAlgorithm::Lzx => {
-            match wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_LZX) {
-                Ok(()) => Ok(()),
-                Err(GError::WofNotAvailable(_)) => {
-                    // WOF driver not available — fall back to NTFS LZNT1
-                    ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_LZNT1)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        CompactAlgorithm::Xpress8k => {
-            match wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS8K) {
-                Ok(()) => Ok(()),
-                Err(GError::WofNotAvailable(_)) => {
-                    ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_LZNT1)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        CompactAlgorithm::Xpress16k => {
-            match wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS16K) {
-                Ok(()) => Ok(()),
-                Err(GError::WofNotAvailable(_)) => {
-                    ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_LZNT1)
-                }
-                Err(e) => Err(e),
-            }
-        }
+        CompactAlgorithm::Xpress4k => wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS4K),
+        CompactAlgorithm::Lzx => wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_LZX),
+        CompactAlgorithm::Xpress8k => wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS8K),
+        CompactAlgorithm::Xpress16k => wof::set_wof_compression(path, wof::FILE_PROVIDER_COMPRESSION_XPRESS16K),
         CompactAlgorithm::None => decompress_file(path),
     }
 }
