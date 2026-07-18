@@ -18,6 +18,7 @@
 
 use crate::error::{GError, GResult};
 use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 

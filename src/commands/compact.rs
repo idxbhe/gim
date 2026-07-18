@@ -16,6 +16,7 @@ use crate::compact::{
     Estimate, FileKind, TargetFolder, WofDriverStatus, WofRuntimeProbe,
     lock_file_path, state_file_path,
     enable_wof_driver, probe_wof_driver, probe_wof_runtime,
+    reset_wof_availability,
 };
 use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::GamesDb;
@@ -114,6 +115,9 @@ pub fn run(
     // The runtime probe is definitive — if it fails, WOF won't work on
     // this volume regardless of what the static probe says.
     if !opts.algorithm.is_decompress() && opts.algorithm.mode() == CompactMode::Wof {
+        // Pastikan cache WOF state bersih sebelum probe definitif
+        reset_wof_availability();
+
         // (a) Static probe — fast, no disk I/O.
         let static_status = probe_wof_driver();
         match static_status {
@@ -171,10 +175,11 @@ pub fn run(
                 WofRuntimeProbe::Ok => {
                     // WOF works on this volume — proceed.
                 }
-                WofRuntimeProbe::NotAttachedToVolume(_code) => {
+                WofRuntimeProbe::NotAttachedToVolume(code) => {
                     println!();
                     println!("  {} WOF (Windows Overlay Filter) is not available on this volume.",
                              c.red("✗"));
+                    println!("  Probe failed with Win32 error: {} (0x{:08X})", code, code);
                     println!("  The WOF driver is installed on this system but is not attached to the");
                     println!("  volume hosting the target directory:");
                     println!("    {}", c.dim(&dir.to_string_lossy()));
@@ -188,7 +193,7 @@ pub fn run(
                     println!("    • Move the game to a WOF-enabled volume (e.g. the system drive).");
                     println!();
                     return Err(GError::WofNotAvailable(
-                        format!("WOF is not attached to volume {}", dir.to_string_lossy()),
+                        format!("WOF is not attached to volume {} (error {code})", dir.to_string_lossy()),
                     ));
                 }
                 WofRuntimeProbe::ProbeFailed(msg) => {

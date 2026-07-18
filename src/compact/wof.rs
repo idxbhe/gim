@@ -27,6 +27,7 @@
 
 use crate::error::{GError, GResult};
 use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,6 +70,7 @@ static WOF_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Win32 error code for "incorrect function" — indicates the WOF driver is
 /// not present or not loaded on this system / volume.
 const ERROR_INVALID_FUNCTION: u32 = 1;
+const ERROR_NOT_SUPPORTED: u32 = 50;
 
 // ── WOF driver status ──────────────────────────────────────────────────
 
@@ -298,6 +300,7 @@ const ERROR_SUCCESS: i32 = 0;
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /// Convert a Rust string to a NUL-terminated UTF-16 wide string.
+#[cfg(target_os = "windows")]
 fn str_to_wide(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = OsStr::new(s).encode_wide().collect();
     v.push(0);
@@ -374,48 +377,90 @@ pub enum WofRuntimeProbe {
 ///
 /// On success the temp file is removed. The global `WOF_UNAVAILABLE` cache
 /// is updated based on the result.
+/// Low-level volume probe that bypasses WOF_UNAVAILABLE cache.
+/// Returns Ok(()) if WOF FSCTL succeeds, otherwise returns raw Win32 error code.
+#[cfg(target_os = "windows")]
+fn probe_wof_volume_raw(target_dir: &Path) -> Result<(), u32> {
+    let probe_name = format!(".gim-wof-probe-{}", std::process::id());
+    let probe_path = target_dir.join(&probe_name);
+
+    // Write 128 KB of highly compressible data — WOF drivers often ignore tiny files
+    let content = vec![b'A'; 128 * 1024];
+    if std::fs::write(&probe_path, &content).is_err() {
+        let _ = std::fs::remove_file(&probe_path);
+        return Err(5); // ERROR_ACCESS_DENIED
+    }
+
+    let guard = match open_file_rw(&probe_path) {
+        Ok(g) => g,
+        Err(_) => {
+            let _ = std::fs::remove_file(&probe_path);
+            return Err(5);
+        }
+    };
+
+    let payload = build_backing_payload(FILE_PROVIDER_COMPRESSION_LZX);
+    let mut returned: u32 = 0;
+
+    let ok = unsafe {
+        DeviceIoControl(
+            guard.0,
+            FSCTL_SET_EXTERNAL_BACKING,
+            payload.as_ptr() as *const std::ffi::c_void,
+            payload.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+
+    // CAPTURE ERROR IMMEDIATELY — before any other Win32 call
+    let err = if ok == 0 { unsafe { GetLastError() } } else { 0 };
+
+    // Best-effort cleanup: remove backing (no-op if probe failed) then delete file
+    unsafe {
+        let _ = DeviceIoControl(
+            guard.0,
+            FSCTL_DELETE_EXTERNAL_BACKING,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        );
+    }
+    drop(guard);
+    let _ = std::fs::remove_file(&probe_path);
+
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
 pub fn probe_wof_runtime(target_dir: &Path) -> WofRuntimeProbe {
     #[cfg(target_os = "windows")]
     {
-        // Need a writable directory to drop a probe file into.
         let dir = match target_dir.canonicalize() {
             Ok(d) => d,
             Err(e) => return WofRuntimeProbe::ProbeFailed(
                 format!("cannot resolve target directory: {e}")),
         };
 
-        // Create a small temp file with some compressible content.
-        let probe_name = format!(".gim-wof-probe-{}", std::process::id());
-        let probe_path = dir.join(&probe_name);
-        let content = b"gim wof probe - compressible padding padding padding padding";
-        if let Err(e) = std::fs::write(&probe_path, content) {
-            return WofRuntimeProbe::ProbeFailed(
-                format!("cannot write probe file to {}: {e}", probe_path.display()));
-        }
-
-        // Run the actual backing IOCTL against the probe file.
-        let result = set_wof_compression(&probe_path, FILE_PROVIDER_COMPRESSION_LZX);
-
-        // Always clean up the probe file.
-        // Best-effort remove; also try decompressing first so we don't
-        // leave a compressed orphan if the probe succeeded.
-        let _ = remove_wof_compression(&probe_path);
-        let _ = std::fs::remove_file(&probe_path);
-
-        match result {
-            Ok(()) => {
-                // WOF works on this volume.
-                WofRuntimeProbe::Ok
-            }
-            Err(GError::WofNotAvailable(_)) => {
-                // Cached failure: driver not attached to volume.
-                let code = unsafe { GetLastError() };
-                WofRuntimeProbe::NotAttachedToVolume(code)
-            }
-            Err(other) => {
-                // Some other error (access denied, etc.). Surface it but
-                // don't claim the volume is WOF-incompatible.
-                WofRuntimeProbe::ProbeFailed(format!("{other}"))
+        match probe_wof_volume_raw(&dir) {
+            Ok(()) => WofRuntimeProbe::Ok,
+            Err(code) => {
+                // ERROR_INVALID_FUNCTION (1)  → WOF driver tidak attach / tidak ada
+                // ERROR_NOT_SUPPORTED (50)    → FS tidak support WOF (non-NTFS, dll)
+                if code == ERROR_INVALID_FUNCTION || code == ERROR_NOT_SUPPORTED {
+                    WofRuntimeProbe::NotAttachedToVolume(code)
+                } else {
+                    WofRuntimeProbe::ProbeFailed(
+                        format!("WOF probe failed with Win32 error {code} (0x{code:08X})"))
+                }
             }
         }
     }
@@ -524,20 +569,15 @@ fn open_file_rw(path: &Path) -> GResult<HandleGuard> {
 
 /// Build the `WOF_EXTERNAL_INFO` + `FILE_PROVIDER_EXTERNAL_INFO_1` payload
 /// that `FSCTL_SET_EXTERNAL_BACKING` expects.
-fn build_backing_payload(algorithm: u32) -> [u8; 16] {
-    // Both structures are 8 bytes each, packed back-to-back. We serialize
-    // them as little-endian bytes (matching x86/x64 Windows) to avoid
-    // `repr(C, packed)` and any UB around unaligned struct references.
+fn build_backing_payload(algorithm: u32) -> [u8; 20] {
     let header = WofExternalInfo { version: WOF_CURRENT_VERSION, provider: WOF_PROVIDER_FILE };
     let body = FileProviderExternalInfo1 { version: 1, algorithm, flags: 0 };
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 20];
     buf[0..4].copy_from_slice(&header.version.to_le_bytes());
     buf[4..8].copy_from_slice(&header.provider.to_le_bytes());
     buf[8..12].copy_from_slice(&body.version.to_le_bytes());
     buf[12..16].copy_from_slice(&body.algorithm.to_le_bytes());
-    // flags would be bytes [16..20] but FILE_PROVIDER_EXTERNAL_INFO_1 used
-    // by SET only reads the first 12 bytes of the body; we keep payload at 16
-    // for alignment safety with all observed Windows versions.
+    buf[16..20].copy_from_slice(&body.flags.to_le_bytes());
     buf
 }
 
@@ -639,11 +679,7 @@ pub fn get_wof_compression(path: &Path) -> GResult<Option<u32>> {
             // via GetLastError: ERROR_NOT_FOUND / ERROR_INVALID_PARAMETER
             // mean "no backing" — return None. Anything else bubbles up.
             let code = unsafe { GetLastError() };
-            // ERROR_INVALID_FUNCTION means WOF driver is not available on
-            // this system. Cache it so set_wof_compression can fast-fail.
-            if code == ERROR_INVALID_FUNCTION {
-                mark_wof_unavailable();
-            }
+            // Note: `get_wof_compression` should NOT call `mark_wof_unavailable()`.
             // ERROR_NOT_FOUND = 1168, ERROR_INVALID_FUNCTION = 1,
             // ERROR_INVALID_PARAMETER = 87, ERROR_NOT_SUPPORTED = 50.
             const ERROR_NOT_FOUND: u32 = 1168;
@@ -716,9 +752,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payload_layout_is_16_bytes() {
+    fn payload_layout_is_20_bytes() {
         let p = build_backing_payload(FILE_PROVIDER_COMPRESSION_LZX);
-        assert_eq!(p.len(), 16);
+        assert_eq!(p.len(), 20);
         // Header version == WOF_CURRENT_VERSION (1) at offset 0.
         assert_eq!(u32::from_le_bytes([p[0], p[1], p[2], p[3]]), WOF_CURRENT_VERSION);
         // Provider == WOF_PROVIDER_FILE (1) at offset 4.
@@ -727,6 +763,8 @@ mod tests {
         assert_eq!(u32::from_le_bytes([p[8], p[9], p[10], p[11]]), 1);
         // Algorithm (LZX = 1) at offset 12.
         assert_eq!(u32::from_le_bytes([p[12], p[13], p[14], p[15]]), FILE_PROVIDER_COMPRESSION_LZX);
+        // Flags (0) at offset 16.
+        assert_eq!(u32::from_le_bytes([p[16], p[17], p[18], p[19]]), 0);
     }
 
     #[test]
@@ -763,6 +801,7 @@ mod tests {
         assert!(matches!(enable_wof_driver(), Err(GError::NotSupportedPlatform)));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn str_to_wide_is_nul_terminated() {
         let w = str_to_wide("hello");
