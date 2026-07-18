@@ -34,12 +34,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Control codes ───────────────────────────────────────────────────────
 // FSCTL_SET_EXTERNAL_BACKING    = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 195,
+//                                          METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+// FSCTL_GET_EXTERNAL_BACKING    = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 196,
 //                                          METHOD_BUFFERED, FILE_ANY_ACCESS)
-// FSCTL_GET_EXTERNAL_BACKING    = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 193, ...)
-// FSCTL_DELETE_EXTERNAL_BACKING = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 196, ...)
-const FSCTL_SET_EXTERNAL_BACKING: u32 = 0x00098C88;
-const FSCTL_GET_EXTERNAL_BACKING: u32 = 0x00098C84;
-const FSCTL_DELETE_EXTERNAL_BACKING: u32 = 0x00098C90;
+// FSCTL_DELETE_EXTERNAL_BACKING = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 197,
+//                                          METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+const FSCTL_SET_EXTERNAL_BACKING: u32 = 0x0009030C;
+const FSCTL_GET_EXTERNAL_BACKING: u32 = 0x00090310;
+const FSCTL_DELETE_EXTERNAL_BACKING: u32 = 0x00090314;
 
 // ── WOF constants ──────────────────────────────────────────────────────
 const WOF_CURRENT_VERSION: u32 = 1;
