@@ -342,6 +342,90 @@ pub fn reset_wof_availability() {
     WOF_UNAVAILABLE.store(false, Ordering::Relaxed);
 }
 
+/// Result of an active runtime probe against a specific volume.
+///
+/// This is more reliable than [`probe_wof_driver`] because it actually
+/// attempts a `FSCTL_SET_EXTERNAL_BACKING` call on a tiny throwaway file in
+/// the target directory, catching cases where the driver is installed but
+/// not attached to the volume (e.g. a secondary data drive that wasn't
+/// configured for WOF).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WofRuntimeProbe {
+    /// WOF works on this volume — safe to proceed with WOF compaction.
+    Ok,
+    /// WOF driver is not attached to the target volume (e.g. `G:` is a
+    /// secondary drive without the WOF filter). The error code from
+    /// `DeviceIoControl` is captured (typically `ERROR_INVALID_FUNCTION`=1).
+    /// `compact.exe /EXE:*` would fail the same way here.
+    NotAttachedToVolume(u32),
+    /// The probe failed for an unrelated reason (couldn't create temp file,
+    /// permission denied, etc.). The error message describes it.
+    ProbeFailed(String),
+}
+
+/// Actively probe whether WOF compression works on the volume hosting
+/// `target_dir`, by creating a throwaway file there and attempting
+/// `FSCTL_SET_EXTERNAL_BACKING` on it.
+///
+/// This is the only reliable way to detect "WOF is installed on the system
+/// but not attached to *this* volume" — a common situation on secondary
+/// data drives. The static [`probe_wof_driver`] check only inspects
+/// `wof.sys` and the registry, which can give a false "Available" result.
+///
+/// On success the temp file is removed. The global `WOF_UNAVAILABLE` cache
+/// is updated based on the result.
+pub fn probe_wof_runtime(target_dir: &Path) -> WofRuntimeProbe {
+    #[cfg(target_os = "windows")]
+    {
+        // Need a writable directory to drop a probe file into.
+        let dir = match target_dir.canonicalize() {
+            Ok(d) => d,
+            Err(e) => return WofRuntimeProbe::ProbeFailed(
+                format!("cannot resolve target directory: {e}")),
+        };
+
+        // Create a small temp file with some compressible content.
+        let probe_name = format!(".gim-wof-probe-{}", std::process::id());
+        let probe_path = dir.join(&probe_name);
+        let content = b"gim wof probe - compressible padding padding padding padding";
+        if let Err(e) = std::fs::write(&probe_path, content) {
+            return WofRuntimeProbe::ProbeFailed(
+                format!("cannot write probe file to {}: {e}", probe_path.display()));
+        }
+
+        // Run the actual backing IOCTL against the probe file.
+        let result = set_wof_compression(&probe_path, FILE_PROVIDER_COMPRESSION_LZX);
+
+        // Always clean up the probe file.
+        // Best-effort remove; also try decompressing first so we don't
+        // leave a compressed orphan if the probe succeeded.
+        let _ = remove_wof_compression(&probe_path);
+        let _ = std::fs::remove_file(&probe_path);
+
+        match result {
+            Ok(()) => {
+                // WOF works on this volume.
+                WofRuntimeProbe::Ok
+            }
+            Err(GError::WofNotAvailable(_)) => {
+                // Cached failure: driver not attached to volume.
+                let code = unsafe { GetLastError() };
+                WofRuntimeProbe::NotAttachedToVolume(code)
+            }
+            Err(other) => {
+                // Some other error (access denied, etc.). Surface it but
+                // don't claim the volume is WOF-incompatible.
+                WofRuntimeProbe::ProbeFailed(format!("{other}"))
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target_dir;
+        WofRuntimeProbe::ProbeFailed("WOF is only available on Windows".to_string())
+    }
+}
+
 // ── File compression structures ────────────────────────────────────────
 
 #[repr(C)]

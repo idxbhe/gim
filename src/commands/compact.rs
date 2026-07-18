@@ -13,9 +13,9 @@
 use crate::compact::{
     check_running_tracked, compress_file, decompress_file,
     scan, summarize, CompactAlgorithm, CompactMode, CompactOptions, CompactPhase, CompactState,
-    Estimate, FileKind, TargetFolder, WofDriverStatus,
+    Estimate, FileKind, TargetFolder, WofDriverStatus, WofRuntimeProbe,
     lock_file_path, state_file_path,
-    enable_wof_driver, probe_wof_driver,
+    enable_wof_driver, probe_wof_driver, probe_wof_runtime,
 };
 use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::GamesDb;
@@ -105,25 +105,36 @@ pub fn run(
     // ── 6. Print summary ─────────────────────────────────────────────
     print_estimate(c, &estimate, &opts, &game.game_dir, &alias);
 
-    // ── 7. WOF availability check ────────────────────────────────────
-    // If the user requested a WOF algorithm (LZX/XPRESS) but the WOF
-    // driver is not available, inform them and offer to fix it.
-    // We do NOT fall back to another algorithm.
+    // ── 7. WOF availability check (pre-flight) ─────────────────────────
+    // Two-stage check:
+    //   a) Static probe: is wof.sys installed + enabled? (registry check)
+    //   b) Runtime probe: try WOF IOCTL on a temp file in the target directory.
+    //      This catches "WOF installed but not attached to this volume".
+    //
+    // The runtime probe is definitive — if it fails, WOF won't work on
+    // this volume regardless of what the static probe says.
     if !opts.algorithm.is_decompress() && opts.algorithm.mode() == CompactMode::Wof {
-        let status = probe_wof_driver();
-        match status {
-            WofDriverStatus::Available => {
-                // WOF driver is present and enabled — proceed normally.
+        // (a) Static probe — fast, no disk I/O.
+        let static_status = probe_wof_driver();
+        match static_status {
+            WofDriverStatus::NotInstalled => {
+                println!();
+                println!("  {} WOF (Windows Overlay Filter) is not available on this system.",
+                         c.red("✗"));
+                println!("  The driver file (wof.sys) was not found.");
+                println!("  WOF compression ({}) cannot be used without this driver.",
+                         opts.algorithm.label());
+                return Err(GError::WofNotAvailable(
+                    "wof.sys driver not found — WOF compression is not available".into(),
+                ));
             }
             WofDriverStatus::Disabled => {
                 println!();
                 println!("  {} WOF (Windows Overlay Filter) is disabled on this system.",
                          c.yellow("⚠"));
                 println!("  The driver file exists but the WOF service is not active.");
-                println!("  This is likely because the service Start type is set to \"Disabled\"");
-                println!("  in the Windows registry.");
                 println!();
-                print!("  Enable the WOF driver? (requires Administrator privileges + restart) [y/N] ");
+                print!("  Enable the WOF driver? (requires Administrator + restart) [y/N] ");
                 io::stdout().flush()?;
                 let mut enable_input = String::new();
                 io::stdin().lock().read_line(&mut enable_input)?;
@@ -131,12 +142,10 @@ pub fn run(
                     match enable_wof_driver() {
                         Ok(()) => {
                             println!();
-                            println!("  {} WOF driver has been enabled in the registry.",
+                            println!("  {} WOF driver enabled in the registry.",
                                      c.green("✓"));
-                            println!("  {} Please restart your computer for the change to take effect,",
-                                     c.yellow("important:"));
-                            println!("  {} then run `gim compact {}` again.",
-                                     c.dim(""), alias);
+                            println!("  {} Restart your computer, then run `gim compact {}` again.",
+                                     c.yellow("important:"), alias);
                             return Ok(());
                         }
                         Err(e) => {
@@ -146,23 +155,46 @@ pub fn run(
                         }
                     }
                 } else {
-                    println!("  compaction cancelled — WOF driver is required for {} compression.",
-                             opts.algorithm.label());
                     return Err(GError::CompactCancelled);
                 }
             }
-            WofDriverStatus::NotInstalled => {
-                println!();
-                println!("  {} WOF (Windows Overlay Filter) is not available on this system.",
-                         c.red("✗"));
-                println!("  The driver file (wof.sys) was not found in the expected location.");
-                println!("  WOF compression ({}) cannot be used without this driver.",
-                         opts.algorithm.label());
-                println!();
-                println!("  This operation is not possible on this system.");
-                return Err(GError::WofNotAvailable(
-                    "wof.sys driver not found — WOF compression is not available on this system".into(),
-                ));
+            WofDriverStatus::Available => {
+                // Static probe passed — now do the runtime probe.
+            }
+        }
+
+        // (b) Runtime probe — definitive volume-level test.
+        // We probe the first target directory that exists.
+        let probe_dir = target_dirs.iter().find(|d| d.exists());
+        if let Some(dir) = probe_dir {
+            match probe_wof_runtime(dir) {
+                WofRuntimeProbe::Ok => {
+                    // WOF works on this volume — proceed.
+                }
+                WofRuntimeProbe::NotAttachedToVolume(_code) => {
+                    println!();
+                    println!("  {} WOF (Windows Overlay Filter) is not available on this volume.",
+                             c.red("✗"));
+                    println!("  The WOF driver is installed on this system but is not attached to the");
+                    println!("  volume hosting the target directory:");
+                    println!("    {}", c.dim(&dir.to_string_lossy()));
+                    println!();
+                    println!("  WOF compression ({}) requires the WOF filter to be attached to the volume.",
+                             opts.algorithm.label());
+                    println!();
+                    println!("  Options:");
+                    println!("    • Use {} for NTFS compression (works on any NTFS volume).",
+                             c.dim("--algorithm ntfs"));
+                    println!("    • Move the game to a WOF-enabled volume (e.g. the system drive).");
+                    println!();
+                    return Err(GError::WofNotAvailable(
+                        format!("WOF is not attached to volume {}", dir.to_string_lossy()),
+                    ));
+                }
+                WofRuntimeProbe::ProbeFailed(msg) => {
+                    eprintln!("  {} WOF runtime probe failed: {}", c.yellow("warning:"), msg);
+                    eprintln!("  Proceeding — compaction may fail per-file.");
+                }
             }
         }
     }
@@ -385,12 +417,23 @@ fn execute_foreground(
 
     println!();
     let verb = if is_decompress { "decompressed" } else { "compacted" };
-    println!("{} {} {} files ({})",
-             c.green("✓"), c.bold(&verb), c.green(&compressed_n.to_string()),
-             format_size(estimate.candidate_size as i64));
-    if failed_n > 0 {
-        println!("  {} {} files failed (access denied, locked, or unsupported filesystem)",
-                 c.yellow("!"), failed_n);
+    if compressed_n > 0 {
+        println!("{} {} {} files ({})",
+                 c.green("✓"), c.bold(&verb), c.green(&compressed_n.to_string()),
+                 format_size(estimate.candidate_size as i64));
+        if failed_n > 0 {
+            println!("  {} {} files failed (access denied, locked, or unsupported filesystem)",
+                     c.yellow("!"), failed_n);
+        }
+    } else {
+        println!("{} no files were {}",
+                 c.red("✗"), verb);
+        if failed_n > 0 {
+            println!("  all {} candidate files failed — the compression method may not be", failed_n);
+            println!("  available on this volume or filesystem. Check the errors above.");
+        } else {
+            println!("  no candidates to compress.");
+        }
     }
 
     Ok(())

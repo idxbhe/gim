@@ -20,7 +20,11 @@ pub mod wof;
 pub use algorithm::{CompactAlgorithm, CompactMode};
 pub use estimate::{Estimate, FileClass, FileKind, ScannedFile, SkipReason, scan, summarize};
 pub use game_running::{GameRunState, RunningGame, check_running_tracked, scan_against};
-pub use wof::{WofDriverStatus, check_wof_available, enable_wof_driver, probe_wof_driver, reset_wof_availability};
+pub use wof::{
+    WofDriverStatus, WofRuntimeProbe,
+    check_wof_available, enable_wof_driver, probe_wof_driver, probe_wof_runtime,
+    reset_wof_availability,
+};
 
 use crate::error::{GError, GResult};
 use std::path::{Path, PathBuf};
