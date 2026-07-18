@@ -45,8 +45,8 @@ const FSCTL_DELETE_EXTERNAL_BACKING: u32 = 0x00090314;
 
 // ── WOF constants ──────────────────────────────────────────────────────
 const WOF_CURRENT_VERSION: u32 = 1;
-/// File backing provider (as opposed to WIM = 2).
-const WOF_PROVIDER_FILE: u32 = 1;
+/// File backing provider (as opposed to WIM = 1).
+const WOF_PROVIDER_FILE: u32 = 2;
 
 /// `FILE_PROVIDER_COMPRESSION_*` algorithm constants (from wofapi.h).
 pub const FILE_PROVIDER_COMPRESSION_XPRESS4K: u32 = 0;
@@ -569,6 +569,26 @@ fn open_file_rw(path: &Path) -> GResult<HandleGuard> {
     Ok(g)
 }
 
+/// Open the file for read-only with broad sharing.
+#[cfg(target_os = "windows")]
+fn open_file_r(path: &Path) -> GResult<HandleGuard> {
+    let mut wide: Vec<u16> = OsStr::new(path).encode_wide().collect();
+    wide.push(0); // NUL terminator
+
+    let access = GENERIC_READ;
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 buffer for the
+    // duration of the call; the other pointer args are null/zero per spec.
+    let h = unsafe {
+        CreateFileW(wide.as_ptr(), access, share, std::ptr::null_mut(),
+                    OPEN_EXISTING, 0, std::ptr::null_mut())
+    };
+    let g = HandleGuard(h);
+    g.check()?;
+    Ok(g)
+}
+
 /// Build the `WOF_EXTERNAL_INFO` + `FILE_PROVIDER_EXTERNAL_INFO_1` payload
 /// that `FSCTL_SET_EXTERNAL_BACKING` expects.
 fn build_backing_payload(algorithm: u32) -> [u8; 20] {
@@ -654,7 +674,7 @@ pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
 pub fn get_wof_compression(path: &Path) -> GResult<Option<u32>> {
     #[cfg(target_os = "windows")]
     {
-        let guard = match open_file_rw(path) {
+        let guard = match open_file_r(path) {
             Ok(g) => g,
             // Don't treat a missing/unreadable file as "not compressed" —
             // surface it so callers can decide. But for a plain stat pass
@@ -727,10 +747,16 @@ pub fn remove_wof_compression(path: &Path) -> GResult<()> {
             )
         };
         if ok == 0 {
-            // ERROR_NOT_FOUND means "not compressed" — treat as success.
+            // ERROR_NOT_FOUND, ERROR_OBJECT_NOT_EXTERNALLY_BACKED, or ERROR_NOT_A_REPARSE_POINT
+            // mean the file is not/no longer compressed/externally backed — treat as success.
             let code = unsafe { GetLastError() };
             const ERROR_NOT_FOUND: u32 = 1168;
-            if code != ERROR_NOT_FOUND {
+            const ERROR_OBJECT_NOT_EXTERNALLY_BACKED: u32 = 342;
+            const ERROR_NOT_A_REPARSE_POINT: u32 = 4390;
+            if code != ERROR_NOT_FOUND
+                && code != ERROR_OBJECT_NOT_EXTERNALLY_BACKED
+                && code != ERROR_NOT_A_REPARSE_POINT
+            {
                 return Err(last_error("DeviceIoControl(FSCTL_DELETE_EXTERNAL_BACKING)"));
             }
         }
@@ -759,7 +785,7 @@ mod tests {
         assert_eq!(p.len(), 20);
         // Header version == WOF_CURRENT_VERSION (1) at offset 0.
         assert_eq!(u32::from_le_bytes([p[0], p[1], p[2], p[3]]), WOF_CURRENT_VERSION);
-        // Provider == WOF_PROVIDER_FILE (1) at offset 4.
+        // Provider == WOF_PROVIDER_FILE (2) at offset 4.
         assert_eq!(u32::from_le_bytes([p[4], p[5], p[6], p[7]]), WOF_PROVIDER_FILE);
         // Body version (1) at offset 8.
         assert_eq!(u32::from_le_bytes([p[8], p[9], p[10], p[11]]), 1);

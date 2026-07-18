@@ -2,3 +2,5 @@ target/
 TODO.md
 movebin.bat
 install.bat
+etc/
+scratch/

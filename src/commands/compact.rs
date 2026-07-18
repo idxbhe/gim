@@ -98,7 +98,7 @@ pub fn run(
             eprintln!("warning: target directory does not exist: {}", dir.display());
             continue;
         }
-        let files = scan(dir, &opts.exclude, progress)?;
+        let files = scan(dir, &opts.exclude, opts.algorithm.is_decompress(), progress)?;
         all_files.extend(files);
     }
     let estimate = summarize(&all_files, opts.algorithm);

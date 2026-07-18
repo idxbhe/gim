@@ -197,7 +197,7 @@ pub fn classify_ext(ext: &str) -> Option<FileClass> {
 /// `already_compressed` checks (WOF backing probe) are only meaningful on
 /// Windows; on other platforms that check is a no-op and we fall back to
 /// extension-based classification.
-pub fn scan(root: &Path, exclude: &[String], progress: &ProgressReporter) -> GResult<Vec<ScannedFile>> {
+pub fn scan(root: &Path, exclude: &[String], decompress: bool, progress: &ProgressReporter) -> GResult<Vec<ScannedFile>> {
     let mut builder = ignore::WalkBuilder::new(root);
     builder.hidden(false).parents(false).ignore(false).git_ignore(false)
         .git_global(false).git_exclude(false).follow_links(false)
@@ -234,6 +234,37 @@ pub fn scan(root: &Path, exclude: &[String], progress: &ProgressReporter) -> GRe
         };
         let size = meta.len();
 
+        let is_wof = wof::get_wof_compression(entry.path()).ok().flatten().is_some();
+        let is_ntfs = {
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::fs::MetadataExt;
+                meta.file_attributes() & 0x800 != 0
+            }
+            #[cfg(not(target_os = "windows"))]
+            false
+        };
+
+        if decompress {
+            if is_wof || is_ntfs {
+                let ext = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("");
+                let cls = classify_ext(ext).unwrap_or(FileClass::Other);
+                out.push(ScannedFile {
+                    path: entry.path().to_path_buf(),
+                    size,
+                    kind: FileKind::Candidate(cls),
+                });
+            } else {
+                out.push(ScannedFile {
+                    path: entry.path().to_path_buf(),
+                    size,
+                    kind: FileKind::Skipped(SkipReason::AlreadyCompressed),
+                });
+            }
+            progress.scan_tick();
+            continue;
+        }
+
         // Tiny file → skip regardless of extension.
         if size < MIN_COMPRESS_SIZE {
             out.push(ScannedFile {
@@ -246,7 +277,7 @@ pub fn scan(root: &Path, exclude: &[String], progress: &ProgressReporter) -> GRe
         }
 
         // Already compressed by WOF → skip (Windows only; no-op elsewhere).
-        if let Ok(Some(_)) = wof::get_wof_compression(entry.path()) {
+        if is_wof {
             out.push(ScannedFile {
                 path: entry.path().to_path_buf(),
                 size,
