@@ -17,7 +17,7 @@ use crate::compact::{
 };
 use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::GamesDb;
-use crate::error::{exit_code, GError, GResult};
+use crate::error::{GError, GResult};
 use crate::locking::LockGuard;
 use crate::output::{Colorizer, ProgressReporter};
 use crate::output::format_size;
@@ -136,7 +136,7 @@ pub fn run(
 
     // ── 8. Execute ───────────────────────────────────────────────────
     if opts.background {
-        return spawn_background(c, &paths, &alias, &game, opts.clone(),
+        return spawn_background(c, &paths, &alias, opts.clone(),
                                  all_files, estimate, auto_pause);
     }
 
@@ -176,7 +176,7 @@ fn print_estimate(
     let target_label = opts.target.as_str();
 
     println!();
-    println!("compact {} {}", c.bold(&alias), c.dim(format!("({target_label}, {algo_label})")));
+    println!("compact {} {}", c.bold(&alias), c.dim(&format!("({target_label}, {algo_label})")));
     println!("  game directory: {}", c.dim(&game_dir.to_string_lossy()));
     println!();
 
@@ -256,7 +256,6 @@ fn execute_foreground(
 
     let compressed = Arc::new(AtomicU64::new(0));
     let failed = Arc::new(AtomicU64::new(0));
-    let skipped = Arc::new(AtomicU64::new(0));
 
     // Configure thread pool if specified.
     let result: Vec<GResult<()>> = if opts.threads > 0 {
@@ -338,7 +337,6 @@ fn spawn_background(
     c: &Colorizer,
     paths: &Paths,
     alias: &str,
-    game: &crate::db::games::Game,
     opts: CompactOptions,
     files: Vec<crate::compact::ScannedFile>,
     estimate: Estimate,
@@ -355,8 +353,6 @@ fn spawn_background(
 
     let state_path = state_file_path(&paths.data_dir, alias);
     let data_dir = paths.data_dir.clone();
-    let alias_owned = alias.to_string();
-    let alias_pause = alias.to_string();
     let is_decompress = opts.algorithm.is_decompress();
 
     println!("starting background compaction...");
@@ -459,7 +455,7 @@ fn spawn_background(
     });
 
     println!();
-    println!("  check status: {}", c.dim(format!("gim compact {} --status", alias)));
+    println!("  check status: {}", c.dim(&format!("gim compact {} --status", alias)));
     println!("  lockfile: {}", c.dim(&lock_path.to_string_lossy()));
     println!();
     println!("{} background compaction started", c.green("✓"));
@@ -509,7 +505,7 @@ fn print_status(c: &Colorizer, paths: &Paths, alias: &str) -> GResult<()> {
             }
             let elapsed = unix_now() - s.started_at;
             if elapsed > 0 {
-                println!("  elapsed:    {}", c.dim(format_duration(elapsed)));
+                println!("  elapsed:    {}", c.dim(&format_duration(elapsed)));
             }
 
             if phase == CompactPhase::Done {
