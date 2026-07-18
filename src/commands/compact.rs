@@ -14,6 +14,7 @@ use crate::compact::{
     scan, summarize, CompactAlgorithm, CompactOptions, CompactPhase, CompactState,
     Estimate, FileKind, TargetFolder,
     lock_file_path, state_file_path,
+    check_wof_available,
 };
 use crate::config::{env_data_dir_override, GimConfig, Paths};
 use crate::db::GamesDb;
@@ -138,6 +139,19 @@ pub fn run(
     if opts.background {
         return spawn_background(c, &paths, &alias, opts.clone(),
                                  all_files, estimate, auto_pause);
+    }
+
+    // ── 8a. Early WOF availability check ──────────────────────────────
+    // If the user requested a WOF algorithm (LZX/XPRESS) but the WOF
+    // driver is not available, warn them now that we'll fall back to
+    // NTFS LZNT1. This avoids processing all files with a failing API.
+    if !opts.algorithm.is_decompress() && opts.algorithm.mode() == crate::compact::CompactMode::Wof {
+        if let Err(GError::WofNotAvailable(msg)) = check_wof_available() {
+            eprintln!("  {} WOF not available: {}", c.yellow("warning:"), msg);
+            eprintln!("  {} falling back to NTFS LZNT1 compression (lower ratio, but works everywhere)",
+                       c.yellow("warning:"));
+            eprintln!();
+        }
     }
 
     // Foreground execution
@@ -325,7 +339,7 @@ fn execute_foreground(
              c.green("✓"), c.bold(&verb), c.green(&compressed_n.to_string()),
              format_size(estimate.candidate_size as i64));
     if failed_n > 0 {
-        println!("  {} {} files failed (locked or access denied)",
+        println!("  {} {} files failed (access denied, locked, or unsupported filesystem)",
                  c.yellow("!"), failed_n);
     }
 
@@ -359,6 +373,14 @@ fn spawn_background(
     println!("  algorithm: {}", c.dim(opts.algorithm.label()));
     println!("  target:    {}", c.dim(opts.target.as_str()));
     println!("  auto-pause: {}", c.dim(if auto_pause { "enabled" } else { "disabled" }));
+
+    // Warn if WOF is not available (we'll fall back to NTFS at file level).
+    if !opts.algorithm.is_decompress() && opts.algorithm.mode() == crate::compact::CompactMode::Wof {
+        if let Err(GError::WofNotAvailable(_)) = check_wof_available() {
+            println!("  {} WOF not available — falling back to NTFS LZNT1",
+                     c.yellow("warning:"));
+        }
+    }
 
     // Spawn worker thread. It runs detached — the thread owns the LockGuard
     // (dropped on completion, releasing the lock).

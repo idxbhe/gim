@@ -28,6 +28,7 @@ pub enum GError {
     #[error("invalid manifest: {0}")] InvalidManifest(String),
     #[error("compaction cancelled by user")] CompactCancelled,
     #[error("compaction error: {0}")] Compact(String),
+    #[error("WOF (Windows Overlay Filter) is not available on this system — {0}")] WofNotAvailable(String),
     #[error("a compaction is already running for game \"{0}\" (lockfile: {1})")] CompactRunning(String, PathBuf),
     #[error("operation requires Windows (only supported on Windows)")] NotSupportedPlatform,
     #[error("sqlite error: {0}")] Sqlite(#[from] rusqlite::Error),
@@ -53,7 +54,8 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _)
         | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _)
         | GError::InvalidManifest(_) | GError::CompactCancelled
-        | GError::CompactRunning(_, _) | GError::NotSupportedPlatform => 2,
+        | GError::CompactRunning(_, _) | GError::WofNotAvailable(_)
+        | GError::NotSupportedPlatform => 2,
         _ => 1,
     }
 }

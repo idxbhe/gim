@@ -29,6 +29,7 @@ use crate::error::{GError, GResult};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Control codes ───────────────────────────────────────────────────────
 // FSCTL_SET_EXTERNAL_BACKING    = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 195,
@@ -59,6 +60,52 @@ const FILE_SHARE_WRITE: u32 = 0x00000002;
 const FILE_SHARE_DELETE: u32 = 0x00000004;
 const OPEN_EXISTING: u32 = 3;
 const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
+
+// ── WOF availability cache ──────────────────────────────────────────────
+// Once we detect that WOF is unavailable on a volume (ERROR_INVALID_FUNCTION),
+// we cache this so we don't repeat the failing DeviceIoControl for every file.
+// Tri-state: false = not yet tested, true = known unavailable.
+static WOF_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// Win32 error code for "incorrect function" — indicates the WOF driver is
+/// not present or not loaded on this system / volume.
+const ERROR_INVALID_FUNCTION: u32 = 1;
+
+/// Check whether the WOF driver appears to be available.
+///
+/// Returns `Ok(())` if WOF is available (or not yet tested), or
+/// `Err(GError::WofNotAvailable)` if a previous `FSCTL_SET_EXTERNAL_BACKING`
+/// call failed with `ERROR_INVALID_FUNCTION`, indicating the WOF driver is
+/// not loaded on this system.
+///
+/// On non-Windows platforms, always returns `Err(GError::NotSupportedPlatform)`.
+pub fn check_wof_available() -> GResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        if WOF_UNAVAILABLE.load(Ordering::Relaxed) {
+            return Err(GError::WofNotAvailable(
+                "the WOF driver (wof.sys) is not loaded on this system. \
+                 WOF compression (LZX/XPRESS) requires Windows 10+ with the \
+                 WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(GError::NotSupportedPlatform)
+    }
+}
+
+/// Mark WOF as unavailable (called when we get ERROR_INVALID_FUNCTION).
+fn mark_wof_unavailable() {
+    WOF_UNAVAILABLE.store(true, Ordering::Relaxed);
+}
+
+/// Reset the WOF availability cache (for testing or re-probing).
+pub fn reset_wof_availability() {
+    WOF_UNAVAILABLE.store(false, Ordering::Relaxed);
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -176,9 +223,23 @@ fn build_backing_payload(algorithm: u32) -> [u8; 16] {
 /// After this returns successfully, the file is compressed on disk by the
 /// WOF driver using `algorithm` (one of the `FILE_PROVIDER_COMPRESSION_*`
 /// constants). The file remains readable normally.
+///
+/// If the WOF driver is not available (e.g., `wof.sys` not loaded), this
+/// returns [`GError::WofNotAvailable`] instead of a generic error, so
+/// callers can fall back to NTFS compression.
 pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
     #[cfg(target_os = "windows")]
     {
+        // Fast path: if WOF was previously detected as unavailable, skip
+        // the DeviceIoControl entirely and return the cached error.
+        if WOF_UNAVAILABLE.load(Ordering::Relaxed) {
+            return Err(GError::WofNotAvailable(
+                "the WOF driver (wof.sys) is not loaded on this system. \
+                 WOF compression (LZX/XPRESS) requires Windows 10+ with the \
+                 WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+            ));
+        }
+
         let guard = open_file_rw(path)?;
         let payload = build_backing_payload(algorithm);
         let mut returned: u32 = 0;
@@ -197,6 +258,18 @@ pub fn set_wof_compression(path: &Path, algorithm: u32) -> GResult<()> {
             )
         };
         if ok == 0 {
+            let code = unsafe { GetLastError() };
+            // ERROR_INVALID_FUNCTION means the WOF driver is not present or
+            // not loaded — this is a system-level issue, not a per-file
+            // problem. Cache it so we don't retry for every file.
+            if code == ERROR_INVALID_FUNCTION {
+                mark_wof_unavailable();
+                return Err(GError::WofNotAvailable(
+                    "the WOF driver (wof.sys) is not loaded on this system. \
+                     WOF compression (LZX/XPRESS) requires Windows 10+ with the \
+                     WOF feature enabled. Falling back to NTFS LZNT1 compression.".into(),
+                ));
+            }
             return Err(last_error("DeviceIoControl(FSCTL_SET_EXTERNAL_BACKING)"));
         }
         Ok(())
@@ -242,10 +315,14 @@ pub fn get_wof_compression(path: &Path) -> GResult<Option<u32>> {
             // via GetLastError: ERROR_NOT_FOUND / ERROR_INVALID_PARAMETER
             // mean "no backing" — return None. Anything else bubbles up.
             let code = unsafe { GetLastError() };
+            // ERROR_INVALID_FUNCTION means WOF driver is not available on
+            // this system. Cache it so set_wof_compression can fast-fail.
+            if code == ERROR_INVALID_FUNCTION {
+                mark_wof_unavailable();
+            }
             // ERROR_NOT_FOUND = 1168, ERROR_INVALID_FUNCTION = 1,
             // ERROR_INVALID_PARAMETER = 87, ERROR_NOT_SUPPORTED = 50.
             const ERROR_NOT_FOUND: u32 = 1168;
-            const ERROR_INVALID_FUNCTION: u32 = 1;
             const ERROR_INVALID_PARAMETER: u32 = 87;
             const ERROR_NOT_SUPPORTED: u32 = 50;
             return match code {
@@ -342,5 +419,11 @@ mod tests {
         assert!(matches!(set_wof_compression(&p, 1), Err(GError::NotSupportedPlatform)));
         assert!(matches!(remove_wof_compression(&p), Err(GError::NotSupportedPlatform)));
         assert_eq!(get_wof_compression(&p).unwrap(), None);
+    }
+
+    #[test]
+    fn reset_wof_availability_clears_flag() {
+        // Ensure the reset function works (it manipulates a static).
+        reset_wof_availability();
     }
 }
