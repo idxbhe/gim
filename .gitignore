@@ -4,3 +4,4 @@ movebin.bat
 install.bat
 etc/
 scratch/
+compact_test_logs/
