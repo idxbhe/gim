@@ -91,21 +91,18 @@ impl SnapsDb {
             // Build params vector. We need references that outlive the
             // execute call. String literals (sid) and borrowed fields
             // (file_path, file_size, modified_time) are fine. For hash,
-            // we convert to String first, then borrow.
+            // we convert to String first, then borrow. Pre-allocate to
+            // avoid one `Vec` allocation per row (the old flat_map+vec!
+            // allocated a small Vec for every data row before flattening).
             let hash_strs: Vec<String> = chunk.iter().map(|f| f.hash.0.clone()).collect();
-            let params: Vec<&dyn rusqlite::ToSql> = chunk
-                .iter()
-                .enumerate()
-                .flat_map(|(i, f)| {
-                    vec![
-                        &sid as &dyn rusqlite::ToSql,
-                        &f.file_path as &dyn rusqlite::ToSql,
-                        &hash_strs[i] as &dyn rusqlite::ToSql,
-                        &f.file_size as &dyn rusqlite::ToSql,
-                        &f.modified_time as &dyn rusqlite::ToSql,
-                    ]
-                })
-                .collect();
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() * 5);
+            for (i, f) in chunk.iter().enumerate() {
+                params.push(&sid);
+                params.push(&f.file_path);
+                params.push(&hash_strs[i]);
+                params.push(&f.file_size);
+                params.push(&f.modified_time);
+            }
             stmt.execute(rusqlite::params_from_iter(params))?;
         }
         Ok(())
@@ -148,9 +145,9 @@ impl SnapsDb {
         let mut stmt = self.conn.prepare("SELECT name, snapshotId, createdAt FROM branches WHERE name = ?1")?;
         stmt.query_row(params![name], |r| Ok(Branch { name: r.get(0)?, snapshot_id: r.get(1)?, created_at: r.get(2)? })).optional().map_err(GError::Sqlite)
     }
-    pub fn insert_branch(&self, name: &str, sid: &str) -> GResult<()> {
+    pub fn insert_branch(&self, name: &str, sid: &str, alias: &str) -> GResult<()> {
         self.conn.execute("INSERT INTO branches (name, snapshotId) VALUES (?1, ?2)", params![name, sid]).map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(err, _) if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => GError::BranchExists(name.to_string(), String::new()),
+            rusqlite::Error::SqliteFailure(err, _) if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY => GError::BranchExists(name.to_string(), alias.to_string()),
             o => GError::Sqlite(o),
         })?; Ok(())
     }
@@ -174,7 +171,7 @@ impl SnapsDb {
             Some(n) if n.is_empty() => Ok(None),
             Some(n) => match self.get_branch(&n)? {
                 Some(b) => Ok(Some(b)),
-                None => Err(GError::Other(format!("current_branch points to missing branch \"{n}\""))),
+                None => Err(GError::BranchDangling(n)),
             },
         }
     }
@@ -186,17 +183,37 @@ impl SnapsDb {
         Ok(())
     }
     pub fn ensure_main_branch(&self) -> GResult<()> {
-        if self.get_branch("main")?.is_none() && self.latest_snapshot()?.is_some() {
-            self.insert_branch("main", &self.latest_snapshot()?.unwrap().snapshot_id)?;
+        // Atomic: create the "main" branch pointing at the latest snapshot,
+        // but only if it does not already exist. A single conditional
+        // INSERT...SELECT eliminates the TOCTOU race that the previous
+        // get_branch()/latest_snapshot()/insert_branch() sequence had, and
+        // avoids re-querying latest_snapshot() just to .unwrap() it.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO branches (name, snapshotId)
+             SELECT 'main', (SELECT snapshotId FROM snaps ORDER BY timestamp DESC, rowid DESC LIMIT 1)
+             WHERE NOT EXISTS (SELECT 1 FROM branches WHERE name = 'main')",
+            [],
+        )?;
+        // Point current_branch at main if nothing is set yet.
+        if self.get_meta("current_branch")?.is_none() {
+            if self.get_branch("main")?.is_some() {
+                self.set_current_branch("main")?;
+            }
         }
-        if self.get_meta("current_branch")?.is_none() && self.get_branch("main")?.is_some() { self.set_current_branch("main")?; }
         Ok(())
     }
     pub fn now_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0) }
 }
 
 pub fn diff_states(parent: &HashMap<String, FileMeta>, current: &HashMap<String, FileMeta>) -> Diff {
-    let mut d = Diff::default();
+    // Pre-allocate: added+modified+unchanged == current.len(),
+    // deleted <= parent.len(). Avoids repeated reallocation.
+    let mut d = Diff {
+        added: Vec::with_capacity(current.len()),
+        modified: Vec::with_capacity(current.len()),
+        deleted: Vec::with_capacity(parent.len()),
+        unchanged: Vec::with_capacity(current.len()),
+    };
     for (p, m) in current {
         match parent.get(p) {
             None => d.added.push(FileEntry { file_path: p.clone(), hash: m.hash.clone(), file_size: m.file_size, modified_time: m.modified_time }),

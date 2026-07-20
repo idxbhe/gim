@@ -57,7 +57,7 @@ fn create_b(sdb: &mut SnapsDb, c: &Colorizer, alias: &str, name: &str, from: Opt
     if !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.') { return Err(GError::Other(format!("invalid branch \"{name}\""))); }
     if sdb.get_branch(name)?.is_some() { return Err(GError::BranchExists(name.to_string(), alias.to_string())); }
     let sid = match from { Some(s) => { sdb.get_snapshot(&s)?.ok_or_else(|| GError::SnapshotNotFound(s.clone(), alias.to_string()))?; s } None => sdb.get_current_branch()?.ok_or_else(|| GError::NoSnapshots(alias.to_string()))?.snapshot_id };
-    sdb.insert_branch(name, &sid)?;
+    sdb.insert_branch(name, &sid, alias)?;
     println!("created branch {} → {}", c.green(name), c.bold(&sid));
     Ok(())
 }

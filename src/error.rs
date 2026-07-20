@@ -16,6 +16,7 @@ pub enum GError {
     #[error("database corruption detected in {0}")] DbCorrupt(PathBuf),
     #[error("branch \"{0}\" does not exist for game \"{1}\"")] BranchNotFound(String, String),
     #[error("branch \"{0}\" already exists for game \"{1}\"")] BranchExists(String, String),
+    #[error("current branch points to missing branch \"{0}\"")] BranchDangling(String),
     #[error("cannot delete the current branch \"{0}\"")] CannotDeleteCurrentBranch(String),
     #[error("cannot delete the protected \"main\" branch")] CannotDeleteMainBranch,
     #[error("uncommitted changes detected — use --force to discard")] UncommittedChanges,
@@ -50,6 +51,7 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::InvalidSnapshotId(_) | GError::NoSnapshots(_) | GError::Locked(_, _)
         | GError::DbCorrupt(_) | GError::IgnorePattern { .. } | GError::Path(_)
         | GError::Config(_) | GError::BranchNotFound(_, _) | GError::BranchExists(_, _)
+        | GError::BranchDangling(_)
         | GError::CannotDeleteCurrentBranch(_) | GError::CannotDeleteMainBranch
         | GError::UncommittedChanges | GError::SnapshotReferencedByBranch(_, _, _)
         | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _)

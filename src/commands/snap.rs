@@ -226,11 +226,16 @@ fn print_dry(alias: &str, id: &str, diff: &crate::db::Diff, locked: &[crate::wal
     for p in &diff.deleted { println!("    - {}", c.red(p)); }
     println!("  unchanged: {}", diff.unchanged.len());
     if !locked.is_empty() { println!("\n  warning: {} locked", locked.len()); }
-    let _ = (id, c);
 }
 
 fn validate_id(id: &str) -> GResult<()> {
     if id.is_empty() || id.starts_with('.') { return Err(GError::InvalidSnapshotId(id.to_string())); }
+    // Snapshot IDs are pure DB labels (never used as filesystem paths — CAS
+    // keys are content hashes, not IDs), so Windows reserved names like CON/
+    // PRN are irrelevant. We still bound length and reject path-like values
+    // (`..`, `/`, `\`) to keep IDs clean and prevent any future misuse.
+    if id.len() > 128 { return Err(GError::InvalidSnapshotId(id.to_string())); }
+    if id.contains("..") || id.contains('/') || id.contains('\\') { return Err(GError::InvalidSnapshotId(id.to_string())); }
     if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') { return Err(GError::InvalidSnapshotId(id.to_string())); }
     Ok(())
 }

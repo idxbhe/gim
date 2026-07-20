@@ -12,7 +12,6 @@ use filetime::FileTime;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
 use std::path::Path;
 
 pub fn run(c: &Colorizer, alias: String, sid: String, full: bool, threads: Option<usize>, dry_run: bool, progress: &ProgressReporter) -> GResult<()> {
@@ -108,22 +107,19 @@ fn copy_all(cas: &Cas, gd: &Path, tc: &[(String, Hash, i64, i64)], progress: &Pr
         // source is a File handle from CAS (not a path).
         let mut src = match cas.open(hash) { Ok(f) => f, Err(e) => return Err(format!("open {hash}: {e}")) };
         let mut dst = match fs::File::create(&abs) { Ok(f) => f, Err(e) => return Err(format!("create {path}: {e}")) };
-        let mut buf = vec![0u8; 1024 * 1024];
-        loop {
-            let n = match src.read(&mut buf) { Ok(0) => break, Ok(n) => n, Err(e) => return Err(format!("read {hash}: {e}")) };
-            if let Err(e) = dst.write_all(&buf[..n]) { return Err(format!("write {path}: {e}")); }
-        }
-
-        // Note: we intentionally do NOT call dst.sync_all() here.
-        // Per-file fsync is extremely expensive for restores with many
-        // small files (10k files = 10k fsync calls, each ~5-10ms).
-        // The OS will flush dirty pages asynchronously. If the user
-        // needs durability guarantees, they can run `sync` after gim
-        // completes. For game file restores, this tradeoff is correct —
-        // speed matters more than crash durability mid-restore.
+        // std::io::copy reads via an internal ~8 KiB buffer (no per-thread
+        // 1 MB allocation) and uses the fastest available backend.
+        if let Err(e) = std::io::copy(&mut src, &mut dst) { return Err(format!("copy {path}: {e}")); }
         drop(dst);
 
-        if *mtime > 0 { let _ = filetime::set_file_mtime(&abs, FileTime::from_unix_time(*mtime, 0)); }
+        if *mtime > 0 {
+            // Preserving mtime matters for a version-control tool: a wrong
+            // timestamp makes the next snap report the file as "modified".
+            // Propagate the failure into the errors list instead of ignoring it.
+            if let Err(e) = filetime::set_file_mtime(&abs, FileTime::from_unix_time(*mtime, 0)) {
+                return Err(format!("set mtime {path}: {e}"));
+            }
+        }
 
         // Only tick on success — failed copies should not advance the
         // progress bar, otherwise the user sees misleading progress.
@@ -141,8 +137,11 @@ fn cleanup(gd: &Path, deleted: &[String]) {
         let abs = crate::path_utils::denormalize(gd, p);
         let mut cur = abs.parent().map(|x| x.to_path_buf());
         while let Some(dir) = cur {
-            if dir == gd || checked.contains(&dir) { break; }
-            checked.insert(dir.clone());
+            // Stop at the game root, and never ascend above it (defends
+            // against trailing-separator / symlink mismatches in the
+            // `dir == gd` equality check).
+            if dir == gd || !dir.starts_with(gd) { break; }
+            if !checked.insert(dir.clone()) { break; }
             match fs::remove_dir(&dir) {
                 Ok(()) => { /* directory was empty, removed */ }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => { /* already gone */ }
