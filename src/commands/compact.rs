@@ -44,6 +44,8 @@ pub fn run(
     background: bool,
     status: bool,
     dry_run: bool,
+    worker: bool,
+    lock_file: Option<String>,
     progress: &ProgressReporter,
 ) -> GResult<()> {
     // ── 1. Resolve paths & config ────────────────────────────────────
@@ -236,6 +238,17 @@ pub fn run(
     }
 
     // ── 9. Execute ───────────────────────────────────────────────────
+    // Worker mode: this process WAS spawned by a `--background` parent to
+    // do the actual compaction in a separate, long-lived process. It holds
+    // the lock and writes `compact.state` for `--status` to read.
+    if worker {
+        let lock_path = lock_file
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| lock_file_path(&paths.data_dir, &alias));
+        return run_worker(c, &paths, &alias, opts.clone(), auto_pause, lock_path);
+    }
+
     if opts.background {
         return spawn_background(c, &paths, &alias, opts.clone(),
                                  all_files, estimate, auto_pause);
@@ -414,10 +427,28 @@ fn execute_foreground(
         progress.compact_done(compressed_n);
     }
 
-    // Report first few errors.
-    let errors: Vec<_> = result.iter().filter_map(|r| r.as_ref().err()).take(5).collect();
-    for e in &errors {
-        eprintln!("  {} {}", c.dim("error:"), e);
+    // Report per-file errors WITH their paths (BUG 3 fix): previously only
+    // the message was printed (no path) and only the first 5 were shown.
+    // Win32 error 344 (ERROR_FILE_SYSTEM_LIMITATION) means the file simply
+    // cannot be WOF-backed — we report those as skipped, not as failures.
+    let mut skip_limit = 0u64;
+    let mut real_errors: Vec<(String, String)> = Vec::new();
+    for (f, r) in candidates.iter().zip(result.iter()) {
+        if let Err(e) = r {
+            let msg = e.to_string();
+            if msg.contains("Win32 error 344") {
+                skip_limit += 1;
+            } else {
+                real_errors.push((f.path.display().to_string(), msg));
+            }
+        }
+    }
+    for (path, msg) in &real_errors {
+        eprintln!("  {} {}: {}", c.dim("error:"), c.dim(path), msg);
+    }
+    if skip_limit > 0 {
+        eprintln!("  {} {} file(s) skipped — filesystem limitation (Win32 error 344): cannot be WOF-backed",
+                  c.yellow("!"), skip_limit);
     }
 
     println!();
@@ -426,9 +457,14 @@ fn execute_foreground(
         println!("{} {} {} files ({})",
                  c.green("✓"), c.bold(&verb), c.green(&compressed_n.to_string()),
                  format_size(estimate.candidate_size as i64));
-        if failed_n > 0 {
-            println!("  {} {} files failed (access denied, locked, or unsupported filesystem)",
-                     c.yellow("!"), failed_n);
+        let real_failures = failed_n.saturating_sub(skip_limit);
+        if skip_limit > 0 {
+            println!("  {} {} file(s) skipped — filesystem limitation (Win32 error 344): cannot be WOF-backed",
+                     c.yellow("!"), skip_limit);
+        }
+        if real_failures > 0 {
+            println!("  {} {} file(s) failed (access denied, locked, or unsupported filesystem)",
+                     c.yellow("!"), real_failures);
         }
     } else {
         println!("{} no files were {}",
@@ -444,133 +480,255 @@ fn execute_foreground(
     Ok(())
 }
 
-/// Spawn a background worker thread for compaction with auto-pause.
+/// Spawn a *detached* `gim` worker process that performs the compaction in
+/// the background, then return immediately so the foreground command can
+/// exit. The worker is a SEPARATE process (not a thread), so it keeps
+/// running after the foreground `gim` exits — fixing the old bug where a
+/// `std::thread` died with the parent and did no work.
+///
+/// The worker re-resolves nothing: we pass the already-resolved options on
+/// the command line. It acquires and holds `compact.lock` for its lifetime
+/// and writes `compact.state` for `gim compact --status` to read.
 fn spawn_background(
     c: &Colorizer,
     paths: &Paths,
     alias: &str,
     opts: CompactOptions,
-    files: Vec<crate::compact::ScannedFile>,
-    estimate: Estimate,
-    auto_pause: bool,
+    _files: Vec<crate::compact::ScannedFile>,
+    _estimate: Estimate,
+    _auto_pause: bool,
 ) -> GResult<()> {
-    // Acquire lock to prevent duplicate workers.
+    // Exclusivity check: refuse if a worker is already holding the lock.
+    // We acquire, confirm it's free, then release so the spawned worker can
+    // take the lock for the duration of the background run.
     let lock_path = lock_file_path(&paths.data_dir, alias);
-    match LockGuard::try_acquire_exclusive(&lock_path)? {
-        Some(_) => {}
-        None => {
-            return Err(GError::CompactRunning(alias.to_string(), lock_path));
+    {
+        let probe = LockGuard::try_acquire_exclusive(&lock_path)?;
+        match probe {
+            Some(_) => {} // free — guard drops here, releasing the lock
+            None => {
+                return Err(GError::CompactRunning(alias.to_string(), lock_path));
+            }
         }
     }
 
     let state_path = state_file_path(&paths.data_dir, alias);
-    let data_dir = paths.data_dir.clone();
-    let is_decompress = opts.algorithm.is_decompress();
+    let _ = std::fs::remove_file(&state_path); // fresh state for the new run
 
     println!("starting background compaction...");
     println!("  algorithm: {}", c.dim(opts.algorithm.label()));
     println!("  target:    {}", c.dim(opts.target.as_str()));
-    println!("  auto-pause: {}", c.dim(if auto_pause { "enabled" } else { "disabled" }));
+    println!("  auto-pause: {}", c.dim(if _auto_pause { "enabled" } else { "disabled" }));
 
-    // Spawn worker thread. It runs detached — the thread owns the LockGuard
-    // (dropped on completion, releasing the lock).
-    std::thread::spawn(move || {
-        let candidates: Vec<crate::compact::ScannedFile> = files.iter()
-            .filter(|f| matches!(f.kind, FileKind::Candidate(_)))
-            .cloned()
-            .collect();
-        let total = candidates.len() as u64;
+    // Build the worker command line.
+    let exe = std::env::current_exe()
+        .map_err(|e| GError::Compact(format!("cannot locate gim executable: {e}")))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("compact").arg(alias)
+        .arg("--worker")
+        .arg("--confirm") // background run is implicitly confirmed; don't prompt
+        .arg("--algorithm").arg(opts.algorithm.as_str())
+        .arg("--target").arg(opts.target.as_str())
+        .arg("--lock-file").arg(&lock_path);
+    if opts.threads > 0 {
+        cmd.arg("--threads").arg(opts.threads.to_string());
+    }
+    for ex in &opts.exclude {
+        cmd.arg("--exclude").arg(ex);
+    }
+    if opts.force {
+        cmd.arg("--force");
+    }
+    // Detach: redirect worker output to a log so it doesn't interleave with
+    // the user's terminal, and so failures are observable.
+    let worker_log = paths.data_dir.join(alias).join("compact.worker.log");
+    if let Some(parent) = worker_log.parent() { let _ = std::fs::create_dir_all(parent); }
+    match std::fs::File::create(&worker_log) {
+        Ok(f) => { cmd.stdout(f.try_clone().unwrap_or_else(|_| std::fs::File::open(&worker_log).unwrap())); cmd.stderr(f); }
+        Err(_) => { cmd.stdin(std::process::Stdio::null()); }
+    }
+    cmd.stdin(std::process::Stdio::null());
 
-        // Save initial state.
-        let mut state = CompactState::new(opts.algorithm, opts.target);
-        state.total_files = total;
-        state.total_size = estimate.candidate_size;
-        if let Err(e) = state.save(&state_path) {
-            eprintln!("compact: failed to write state: {e}");
+    match cmd.spawn() {
+        Ok(child) => {
+            // Detach: we do NOT wait. The child outlives this process.
+            let _ = child.id();
+            std::mem::forget(child);
         }
-        state.phase = CompactPhase::Running.as_str().to_string();
-        if let Err(e) = state.save(&state_path) {
-            eprintln!("compact: failed to write state: {e}");
+        Err(e) => {
+            return Err(GError::Compact(format!(
+                "failed to spawn background worker: {e}")));
         }
-
-        let compressed = AtomicU64::new(0);
-        let failed = AtomicU64::new(0);
-        let pause_flag = Arc::new(AtomicBool::new(false));
-
-        // Process files in batches with auto-pause checks.
-        let batch_size = 64usize;
-        let mut idx = 0usize;
-
-        while idx < candidates.len() {
-            // Auto-pause: check if any tracked game is running.
-            if auto_pause {
-                let gdb = match GamesDb::open(&data_dir.join("games.db")) {
-                    Ok(db) => db,
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_secs(1));
-                        continue;
-                    }
-                };
-                match check_running_tracked(&gdb) {
-                    Ok(rs) if rs.any() && !pause_flag.load(Ordering::Relaxed) => {
-                        pause_flag.store(true, Ordering::Relaxed);
-                        state.phase = CompactPhase::Paused.as_str().to_string();
-                        state.message = format!("paused: {}", rs.summary());
-                        let _ = state.save(&state_path);
-                    }
-                    Ok(rs) if !rs.any() && pause_flag.load(Ordering::Relaxed) => {
-                        pause_flag.store(false, Ordering::Relaxed);
-                        state.phase = CompactPhase::Running.as_str().to_string();
-                        state.message = String::new();
-                        let _ = state.save(&state_path);
-                    }
-                    _ => {}
-                }
-                if pause_flag.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_secs(5));
-                    continue;
-                }
-            }
-
-            // Process one batch.
-            let end = (idx + batch_size).min(candidates.len());
-            for f in &candidates[idx..end] {
-                let r = if is_decompress {
-                    decompress_file(&f.path)
-                } else {
-                    compress_file(&f.path, &opts)
-                };
-                match r {
-                    Ok(()) => { compressed.fetch_add(1, Ordering::Relaxed); }
-                    Err(_) => { failed.fetch_add(1, Ordering::Relaxed); }
-                }
-            }
-            idx = end;
-
-            // Update state file.
-            state.processed_files = idx as u64;
-            state.compressed_files = compressed.load(Ordering::Relaxed);
-            state.failed_files = failed.load(Ordering::Relaxed);
-            state.updated_at = unix_now();
-            let _ = state.save(&state_path);
-        }
-
-        // Done.
-        state.processed_files = total;
-        state.phase = CompactPhase::Done.as_str().to_string();
-        state.message = format!("completed: {} compressed, {} failed",
-                                compressed.load(Ordering::Relaxed),
-                                failed.load(Ordering::Relaxed));
-        let _ = state.save(&state_path);
-
-        // Lock is released here when LockGuard is dropped.
-    });
+    }
 
     println!();
     println!("  check status: {}", c.dim(&format!("gim compact {} --status", alias)));
     println!("  lockfile: {}", c.dim(&lock_path.to_string_lossy()));
+    println!("  worker log: {}", c.dim(&worker_log.to_string_lossy()));
     println!();
     println!("{} background compaction started", c.green("✓"));
+    Ok(())
+}
+
+/// Worker entry point. Runs in a SEPARATE `gim` process spawned by
+/// `spawn_background`. Performs the actual scan + compress/decompress, holds
+/// the lock for its lifetime, and writes `compact.state` for `--status`.
+fn run_worker(
+    c: &Colorizer,
+    paths: &Paths,
+    alias: &str,
+    opts: CompactOptions,
+    auto_pause: bool,
+    lock_path: PathBuf,
+) -> GResult<()> {
+    // Adopt the lock so `--status` sees an active run and a second
+    // `--background` is refused while we're working.
+    let _lock = match LockGuard::try_acquire_exclusive(&lock_path)? {
+        Some(g) => g,
+        None => {
+            return Err(GError::CompactRunning(alias.to_string(), lock_path));
+        }
+    };
+
+    let state_path = state_file_path(&paths.data_dir, alias);
+    let data_dir = paths.data_dir.clone();
+    let is_decompress = opts.algorithm.is_decompress();
+    let progress = ProgressReporter::new(false); // no live bar in worker
+
+    // Resolve target dirs and scan.
+    let game = crate::db::GamesDb::open(&paths.games_db)?
+        .get(alias)?
+        .ok_or_else(|| GError::AliasNotFound(alias.to_string()))?;
+    let target_dirs = resolve_target_dirs(&game.game_dir, &game.data_dir, paths, alias, opts.target);
+    let mut all_files: Vec<crate::compact::ScannedFile> = Vec::new();
+    for dir in &target_dirs {
+        if !dir.exists() { continue; }
+        let files = scan(dir, &opts.exclude, is_decompress, &progress)?;
+        all_files.extend(files);
+    }
+    let estimate = summarize(&all_files, opts.algorithm);
+    let candidates: Vec<crate::compact::ScannedFile> = all_files
+        .iter()
+        .filter(|f| matches!(f.kind, FileKind::Candidate(_)))
+        .cloned()
+        .collect();
+    let total = candidates.len() as u64;
+
+    // Initial state.
+    let mut state = CompactState::new(opts.algorithm, opts.target);
+    state.total_files = total;
+    state.total_size = estimate.candidate_size;
+    state.phase = CompactPhase::Running.as_str().to_string();
+    let _ = state.save(&state_path);
+
+    let compressed = AtomicU64::new(0);
+    let failed = AtomicU64::new(0);
+    let failed_details: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let pause_flag = Arc::new(AtomicBool::new(false));
+
+    let batch_size = 64usize;
+    let mut idx = 0usize;
+    while idx < candidates.len() {
+        if auto_pause {
+            let gdb = match GamesDb::open(&data_dir.join("games.db")) {
+                Ok(db) => db,
+                Err(_) => { std::thread::sleep(Duration::from_secs(1)); continue; }
+            };
+            match check_running_tracked(&gdb) {
+                Ok(rs) if rs.any() && !pause_flag.load(Ordering::Relaxed) => {
+                    pause_flag.store(true, Ordering::Relaxed);
+                    state.phase = CompactPhase::Paused.as_str().to_string();
+                    state.message = format!("paused: {}", rs.summary());
+                    let _ = state.save(&state_path);
+                }
+                Ok(rs) if !rs.any() && pause_flag.load(Ordering::Relaxed) => {
+                    pause_flag.store(false, Ordering::Relaxed);
+                    state.phase = CompactPhase::Running.as_str().to_string();
+                    state.message = String::new();
+                    let _ = state.save(&state_path);
+                }
+                _ => {}
+            }
+            if pause_flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        }
+
+        let end = (idx + batch_size).min(candidates.len());
+        for f in &candidates[idx..end] {
+            let r = if is_decompress {
+                decompress_file(&f.path)
+            } else {
+                compress_file(&f.path, &opts)
+            };
+            match r {
+                Ok(()) => { compressed.fetch_add(1, Ordering::Relaxed); }
+                Err(e) => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut v) = failed_details.lock() {
+                        v.push((f.path.display().to_string(), e.to_string()));
+                    }
+                }
+            }
+        }
+        idx = end;
+
+        state.processed_files = idx as u64;
+        state.compressed_files = compressed.load(Ordering::Relaxed);
+        state.failed_files = failed.load(Ordering::Relaxed);
+        state.updated_at = unix_now();
+        let _ = state.save(&state_path);
+    }
+
+    // Report per-file errors WITH paths (BUG 3 fix). Win32 error 344
+    // (ERROR_FILE_SYSTEM_LIMITATION) means the file simply cannot be
+    // WOF-backed — report those as skipped, not as failures.
+    let details = failed_details.into_inner().unwrap_or_default();
+    let mut skip_limit = 0u64;
+    let mut real_errors: Vec<(String, String)> = Vec::new();
+    for (path, msg) in &details {
+        if msg.contains("Win32 error 344") {
+            skip_limit += 1;
+        } else {
+            real_errors.push((path.clone(), msg.clone()));
+        }
+    }
+    for (path, msg) in &real_errors {
+        eprintln!("  {} {}: {}", c.dim("error:"), c.dim(path), msg);
+    }
+    if skip_limit > 0 {
+        eprintln!("  {} {} file(s) skipped — filesystem limitation (Win32 error 344): cannot be WOF-backed",
+                  c.yellow("!"), skip_limit);
+    }
+
+    // Done.
+    let compressed_n = compressed.load(Ordering::Relaxed);
+    let failed_n = failed.load(Ordering::Relaxed);
+    let real_failures = failed_n.saturating_sub(skip_limit);
+    state.processed_files = total;
+    state.phase = CompactPhase::Done.as_str().to_string();
+    state.message = if skip_limit > 0 && real_failures == 0 {
+        format!("completed: {} compressed, {} skipped (Win32 344)", compressed_n, skip_limit)
+    } else if real_failures > 0 {
+        format!("completed: {} compressed, {} failed, {} skipped (Win32 344)",
+                compressed_n, real_failures, skip_limit)
+    } else {
+        format!("completed: {} compressed", compressed_n)
+    };
+    let _ = state.save(&state_path);
+
+    let verb = if is_decompress { "decompressed" } else { "compacted" };
+    println!("{} {} {} files",
+             c.green("✓"), verb, compressed_n);
+    if skip_limit > 0 {
+        println!("  {} {} file(s) skipped — filesystem limitation (Win32 error 344): cannot be WOF-backed",
+                 c.yellow("!"), skip_limit);
+    }
+    if real_failures > 0 {
+        println!("  {} {} file(s) failed (access denied, locked, or unsupported filesystem)",
+                 c.yellow("!"), real_failures);
+    }
     Ok(())
 }
 

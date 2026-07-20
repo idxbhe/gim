@@ -172,5 +172,11 @@ pub enum Command {
         /// Dry run — scan and show estimate only, no changes.
         #[arg(long = "dry-run")]
         dry_run: bool,
+        /// (internal) Run as a background worker process spawned by --background.
+        #[arg(long, hide = true)]
+        worker: bool,
+        /// (internal) Lock-file path for the background worker to adopt.
+        #[arg(long = "lock-file", hide = true)]
+        lock_file: Option<String>,
     },
 }

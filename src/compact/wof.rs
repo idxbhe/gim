@@ -747,8 +747,14 @@ pub fn remove_wof_compression(path: &Path) -> GResult<()> {
             )
         };
         if ok == 0 {
-            // ERROR_NOT_FOUND, ERROR_OBJECT_NOT_EXTERNALLY_BACKED, or ERROR_NOT_A_REPARSE_POINT
-            // mean the file is not/no longer compressed/externally backed — treat as success.
+            // ERROR_NOT_FOUND, ERROR_OBJECT_NOT_EXTERNALLY_BACKED, or
+            // ERROR_NOT_A_REPARSE_POINT mean the file is not/no longer
+            // externally backed — treat as success.
+            // ERROR_INVALID_FUNCTION / ERROR_NOT_SUPPORTED mean the WOF
+            // driver is not available on this volume/system at all — there
+            // is nothing to remove, so also treat as success. Without this,
+            // decompressing a purely NTFS-compressed file on a WOF-less
+            // volume (e.g. the Gim install drive) would always fail.
             let code = unsafe { GetLastError() };
             const ERROR_NOT_FOUND: u32 = 1168;
             const ERROR_OBJECT_NOT_EXTERNALLY_BACKED: u32 = 342;
@@ -756,6 +762,8 @@ pub fn remove_wof_compression(path: &Path) -> GResult<()> {
             if code != ERROR_NOT_FOUND
                 && code != ERROR_OBJECT_NOT_EXTERNALLY_BACKED
                 && code != ERROR_NOT_A_REPARSE_POINT
+                && code != ERROR_INVALID_FUNCTION
+                && code != ERROR_NOT_SUPPORTED
             {
                 return Err(last_error("DeviceIoControl(FSCTL_DELETE_EXTERNAL_BACKING)"));
             }

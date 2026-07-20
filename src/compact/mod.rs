@@ -123,13 +123,15 @@ pub fn compress_file(path: &Path, opts: &CompactOptions) -> GResult<()> {
 ///
 /// We try both mechanisms — WOF delete is a no-op if the file wasn't
 /// WOF-backed, and NTFS `COMPRESSION_FORMAT_NONE` is a no-op if it wasn't
-/// NTFS-compressed, so the order doesn't matter.
+/// NTFS-compressed, so the order doesn't matter. The NTFS step uses a
+/// verified decompress (with a copy-replace fallback) so it never reports
+/// success while the file is still compressed (see BUG 1).
 pub fn decompress_file(path: &Path) -> GResult<()> {
     // Try WOF first; if there's no WOF backing this returns Ok anyway
     // (ERROR_NOT_FOUND is treated as success inside the FFI layer).
     wof::remove_wof_compression(path)?;
-    // Then clear NTFS compression state.
-    ntfs::set_ntfs_compression(path, ntfs::COMPRESSION_FORMAT_NONE)?;
+    // Then clear NTFS compression state, verifying it actually cleared.
+    ntfs::decompress_ntfs_verified(path)?;
     Ok(())
 }
 

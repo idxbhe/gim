@@ -20,6 +20,8 @@ use crate::error::{GError, GResult};
 use std::ffi::OsStr;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 
 // FSCTL_SET_COMPRESSION = CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 16,
@@ -97,6 +99,16 @@ fn open_file_rw(path: &Path) -> GResult<HandleGuard> {
     Ok(HandleGuard(h))
 }
 
+/// Whether the file currently has the NTFS `Compressed` attribute set.
+#[cfg(target_os = "windows")]
+fn is_ntfs_compressed(path: &Path) -> GResult<bool> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(meta.file_attributes() & 0x800 != 0)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn _unused(_p: &Path) {}
+
 /// Set NTFS compression state on a file.
 ///
 /// Pass [`COMPRESSION_FORMAT_LZNT1`] to compress, or
@@ -132,6 +144,107 @@ pub fn set_ntfs_compression(path: &Path, format: u16) -> GResult<()> {
         let _ = (path, format);
         Err(GError::NotSupportedPlatform)
     }
+}
+
+/// Remove NTFS compression from a file, **verifying** the `Compressed`
+/// attribute actually cleared.
+///
+/// `FSCTL_SET_COMPRESSION(NONE)` is normally enough, but on some files
+/// (large, sparse, or files another handle keeps open) the attribute does
+/// not clear synchronously and the FSCTL still reports success — leaving
+/// the file compressed while the caller believes it succeeded. This matches
+/// the behaviour `compact.exe /U` works around: after the in-place FSCTL we
+/// re-check the attribute, and if it is still set we fall back to a
+/// copy-to-temp (uncompressed) + atomic rename, which always works.
+pub fn decompress_ntfs_verified(path: &Path) -> GResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // Nothing to do if it isn't compressed.
+        if !is_ntfs_compressed(path)? {
+            return Ok(());
+        }
+        // Try the in-place FSCTL first.
+        let _ = set_ntfs_compression(path, COMPRESSION_FORMAT_NONE);
+        // Verify; if it cleared, we're done.
+        if !is_ntfs_compressed(path)? {
+            return Ok(());
+        }
+        // Fallback: copy to an uncompressed temp file on the same volume,
+        // then atomically replace the original. This is what robust
+        // decompressors (incl. compact.exe /U) do for stubborn files.
+        copy_replace_uncompressed(path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err(GError::NotSupportedPlatform)
+    }
+}
+
+/// Copy `path` to a temp file (uncompressed) in the same directory, then
+/// rename it over the original. The temp file is explicitly created with
+/// `COMPRESSION_FORMAT_NONE` so the copy is written uncompressed.
+#[cfg(target_os = "windows")]
+fn copy_replace_uncompressed(path: &Path) -> GResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp_name = format!(".gim-ntfs-dec-{}-{}.tmp", std::process::id(), stem);
+    let tmp = parent.join(tmp_name);
+
+    // Remove any stale temp from a previous interrupted run.
+    let _ = std::fs::remove_file(&tmp);
+
+    // Open the source for reading (validates it exists / is readable).
+    let _src = std::fs::File::open(path)
+        .map_err(|e| GError::Compact(format!("open source {path:?}: {e}")))?;
+
+    // Create the temp destination explicitly uncompressed, then copy.
+    {
+        let tmp_path = tmp.clone();
+        let _guard = open_uncompressed_for_write(&tmp_path)?;
+    }
+
+    if let Err(e) = std::fs::copy(path, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(GError::Compact(format!("copy {path:?}: {e}")));
+    }
+
+    // Preserve attributes other than compression? We keep it simple: replace.
+    std::fs::rename(&tmp, path)
+        .map_err(|e| GError::Compact(format!("rename temp over {path:?}: {e}")))?;
+    Ok(())
+}
+
+/// Open `path` for write with NTFS compression explicitly disabled, then
+/// return the handle (held until dropped) so the file is created
+/// uncompressed before any data is written.
+#[cfg(target_os = "windows")]
+fn open_uncompressed_for_write(path: &Path) -> GResult<HandleGuard> {
+    let mut wide: Vec<u16> = OsStr::new(path).encode_wide().collect();
+    wide.push(0);
+    let access = GENERIC_READ | GENERIC_WRITE;
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let h = unsafe {
+        CreateFileW(wide.as_ptr(), access, share, std::ptr::null_mut(),
+                    OPEN_EXISTING, 0, std::ptr::null_mut())
+    };
+    // If it doesn't exist yet, create it.
+    if h.is_null() || h == INVALID_HANDLE_VALUE {
+        let h2 = unsafe {
+            CreateFileW(wide.as_ptr(), access, share, std::ptr::null_mut(),
+                        // CREATE_ALWAYS = 2
+                        2, 0, std::ptr::null_mut())
+        };
+        if h2.is_null() || h2 == INVALID_HANDLE_VALUE {
+            return Err(last_error("CreateFileW(temp)"));
+        }
+        let guard = HandleGuard(h2);
+        set_ntfs_compression(path, COMPRESSION_FORMAT_NONE)?;
+        return Ok(guard);
+    }
+    let guard = HandleGuard(h);
+    set_ntfs_compression(path, COMPRESSION_FORMAT_NONE)?;
+    Ok(guard)
 }
 
 #[cfg(target_os = "windows")]
