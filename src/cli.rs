@@ -179,4 +179,35 @@ pub enum Command {
         #[arg(long = "lock-file", hide = true)]
         lock_file: Option<String>,
     },
+    /// Defragment a game folder's files on HDD volumes via Windows FSCTLs.
+    /// Skips SSDs by default (defrag hurts them). Requires administrator
+    /// privileges — will prompt UAC if not elevated.
+    Defrag {
+        /// Game alias.
+        alias: String,
+        /// Which folder to defrag: game (default), data, both.
+        #[arg(long, value_name = "FOLDER")]
+        target: Option<String>,
+        /// Skip yes/no confirmation prompt.
+        #[arg(long)]
+        confirm: bool,
+        /// Force defrag even if estimated savings are low or the volume
+        /// is SSD (with --allow-ssd, SSDs only get TRIM skip).
+        #[arg(long)]
+        force: bool,
+        /// Allow running on SSD volumes. SSDs are skipped (no cluster
+        /// moves issued) — this just overrides the "refuse SSD" guard.
+        #[arg(long)]
+        allow_ssd: bool,
+        /// Number of threads (default: 1; defrag is single-threaded for
+        /// safety — multi-threaded cluster moves can deadlock with VSS).
+        #[arg(long, short = 't')]
+        threads: Option<usize>,
+        /// Exclude files matching patterns (gitignore syntax). Repeatable.
+        #[arg(long)]
+        exclude: Option<Vec<String>>,
+        /// Dry run — scan and show plan only, no files moved.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
 }

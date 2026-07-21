@@ -287,6 +287,30 @@ impl ProgressReporter {
     pub fn decompress_start(&self, total: usize) { self.phase_start("decompressing", total); }
     pub fn decompress_tick(&self) { self.phase_tick(); }
     pub fn decompress_done(&self, _count: u64) { self.phase_done("decompressed"); }
+
+    // ── defrag phases (one per workflow stage) ─────────────────────
+    // Each maps to one of the 7 stages in instruction.md so the user can
+    // follow along.
+
+    /// Stage 3 — analyzing game file fragmentation.
+    pub fn defrag_analyze_start(&self, total: usize) { self.phase_start("analyzing", total); }
+    pub fn defrag_analyze_tick(&self) { self.phase_tick(); }
+    pub fn defrag_analyze_done(&self, _count: u64) { self.phase_done("analyzed"); }
+
+    /// Stage 4 — scanning NTFS volume bitmap.
+    pub fn defrag_scan_start(&self) { self.phase_start("scanning bitmap", 0); }
+    pub fn defrag_scan_tick(&self) { self.phase_tick(); }
+    pub fn defrag_scan_done(&self, _count: u64) { self.phase_done("scanned"); }
+
+    /// Stage 6 — defragmenting files (moving fragmented clusters).
+    pub fn defrag_start(&self, total: usize) { self.phase_start("defragging", total); }
+    pub fn defrag_tick(&self) { self.phase_tick(); }
+    pub fn defrag_done(&self, _count: u64) { self.phase_done("defragged"); }
+
+    /// Stage 7 — consolidating files into the fast zone.
+    pub fn consolidate_start(&self, total: usize) { self.phase_start("consolidating", total); }
+    pub fn consolidate_tick(&self) { self.phase_tick(); }
+    pub fn consolidate_done(&self, _count: u64) { self.phase_done("consolidated"); }
 }
 
 impl Drop for ProgressReporter {
@@ -370,6 +394,10 @@ mod tests {
         r.delete_start(5); r.delete_tick(); r.delete_done(0);
         r.compact_start(5); r.compact_tick(); r.compact_done(0);
         r.decompress_start(3); r.decompress_tick(); r.decompress_done(0);
+        r.defrag_analyze_start(10); r.defrag_analyze_tick(); r.defrag_analyze_done(0);
+        r.defrag_scan_start(); r.defrag_scan_tick(); r.defrag_scan_done(0);
+        r.defrag_start(5); r.defrag_tick(); r.defrag_done(0);
+        r.consolidate_start(3); r.consolidate_tick(); r.consolidate_done(0);
     }
 
     #[test]

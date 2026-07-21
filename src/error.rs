@@ -32,6 +32,11 @@ pub enum GError {
     #[error("WOF (Windows Overlay Filter) is not available on this system — {0}")] WofNotAvailable(String),
     #[error("a compaction is already running for game \"{0}\" (lockfile: {1})")] CompactRunning(String, PathBuf),
     #[error("operation requires Windows (only supported on Windows)")] NotSupportedPlatform,
+    #[error("defrag cancelled by user")] DefragCancelled,
+    #[error("defrag error: {0}")] Defrag(String),
+    #[error("defrag refused: volume has only {0}% free space (need at least {1}%) — free up disk space first")] DefragLowFreeSpace(u8, u8),
+    #[error("defrag refused: target volume is not an HDD (defragmenting SSDs degrades them with no benefit). Use --allow-ssd to override (TRIM only)")] DefragNotHdd,
+    #[error("defrag refused: this command requires administrator privileges. Re-run as admin or accept the UAC prompt")] DefragNeedsAdmin,
     #[error("sqlite error: {0}")] Sqlite(#[from] rusqlite::Error),
     #[error("io error: {0}")] Io(#[from] io::Error),
     #[error("path error: {0}")] Path(String),
@@ -57,7 +62,9 @@ pub fn exit_code(err: &GError) -> i32 {
         | GError::RehashCancelled | GError::HashAlgorithmMismatch(_, _)
         | GError::InvalidManifest(_) | GError::CompactCancelled
         | GError::CompactRunning(_, _) | GError::WofNotAvailable(_)
-        | GError::NotSupportedPlatform => 2,
+        | GError::NotSupportedPlatform | GError::DefragCancelled
+        | GError::DefragLowFreeSpace(_, _) | GError::DefragNotHdd
+        | GError::DefragNeedsAdmin => 2,
         _ => 1,
     }
 }

@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────────
+# gim compression profile: oodle
+# ──────────────────────────────────────────────────────────────────────
+# Oodle (kraken+mermaid) — codec used by Unreal Engine and AAA games.
+# Best for: Unreal Engine games, Epic Games Store titles.
+# Requires oo2core_*.dll from the game directory.
+#
+# See zstd.gimprofile for full parameter documentation.
+# See xtool/MANUAL.md for complete xtool documentation.
+
+name = "oodle"
+description = "Oodle (kraken+mermaid) — best for Unreal Engine games"
+
+# Layer 1: Precompression
+# kraken+mermaid covers most oodle stream variants.
+# Add "+zstd" if the game uses mixed codecs.
+codecs = "kraken+mermaid+preflate"
+codec_level = 4
+chunk_size = "64mb"
+depth = 0
+dbase = true
+dedup = "dedup.bin"
+dedup_memory = "0"
+diff = "5p"
+low_memory = false
+skip_verify = false
+full_scan = false
+optimize_decode = false
+prefetch_cache = "0mb"
+recompress = ""
+reassign = ""
+extract_dir = ""
+
+# Layer 2: Output compression
+compression_level = 5
+compression_dict = ""
+compression_high = false
+external_compressor = ""
+
+# Resource
+threads = "0"
+thread_priority = "normal"
+
+# Custom libraries
+# Leave empty to auto-detect oo2core_*.dll from game directory.
+lz4_library = ""
+zstd_library = ""
+oodle_library = ""
+
+# Debug
+verbose = false

@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod compact;
 pub mod config;
+pub mod defrag;
 pub mod db;
 pub mod error;
 pub mod hashing;

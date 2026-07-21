@@ -14,6 +14,12 @@
 //! - `compact.algorithm` — `lzx` (default) | `xpress4k` | `xpress8k` | `xpress16k` | `ntfs` | `none`
 //! - `compact.threads` — `0` (auto, default) | N
 //! - `compact.auto_pause` — `true` (default) | `false`
+//! - `defrag.min_free_pct` — `15` (default) — refuse to run below this free space
+//! - `defrag.fragment_threshold_pct` — `5` (default) — skip files below this fragmentation
+//! - `defrag.max_extents` — `20` (default) — NTFS attribute-list safety cap
+//! - `defrag.throttle_mb` — `500` (default) — sleep after this much I/O
+//! - `defrag.throttle_sleep_ms` — `200` (default) — sleep duration
+//! - `defrag.consolidate` — `true` (default) | `false`
 //!
 //! When `hash.algorithm` is changed on a game that already has
 //! snapshots, the user is prompted to confirm a full rehash.
@@ -36,6 +42,12 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("compact.algorithm", "lzx"),
     ("compact.threads", "0"),
     ("compact.auto_pause", "true"),
+    ("defrag.min_free_pct", "15"),
+    ("defrag.fragment_threshold_pct", "5"),
+    ("defrag.max_extents", "20"),
+    ("defrag.throttle_mb", "500"),
+    ("defrag.throttle_sleep_ms", "200"),
+    ("defrag.consolidate", "true"),
 ];
 
 /// A config store — holds key/value pairs parsed from a config file.
@@ -128,6 +140,39 @@ impl GimConfig {
     /// Whether to auto-pause background compaction when a tracked game is running.
     pub fn compact_auto_pause(&self) -> bool {
         self.get("compact.auto_pause") == "true"
+    }
+
+    // ── defrag.* accessors ─────────────────────────────────────────
+
+    /// Minimum free space percentage required for defrag (default 15).
+    pub fn defrag_min_free_pct(&self) -> u8 {
+        self.get_parsed::<u8>("defrag.min_free_pct").unwrap_or(15)
+    }
+
+    /// Fragmentation threshold below which files are skipped (default 5%).
+    pub fn defrag_fragment_threshold_pct(&self) -> u8 {
+        self.get_parsed::<u8>("defrag.fragment_threshold_pct").unwrap_or(5)
+    }
+
+    /// Max extents per file before we give up (default 20, NTFS attribute
+    /// list safety).
+    pub fn defrag_max_extents(&self) -> u32 {
+        self.get_parsed::<u32>("defrag.max_extents").unwrap_or(20)
+    }
+
+    /// I/O throttle budget in MB (default 500).
+    pub fn defrag_throttle_mb(&self) -> u64 {
+        self.get_parsed::<u64>("defrag.throttle_mb").unwrap_or(500)
+    }
+
+    /// I/O throttle sleep duration in ms (default 200).
+    pub fn defrag_throttle_sleep_ms(&self) -> u64 {
+        self.get_parsed::<u64>("defrag.throttle_sleep_ms").unwrap_or(200)
+    }
+
+    /// Whether to run the consolidation phase (default true).
+    pub fn defrag_consolidate(&self) -> bool {
+        self.get("defrag.consolidate") == "true"
     }
 
     /// Set a key/value. Does NOT write to disk — call `save()` for that.
@@ -265,6 +310,52 @@ pub fn validate_value(key: &str, value: &str) -> GResult<()> {
             }
             Ok(())
         }
+        "defrag.min_free_pct" => {
+            let n: u8 = value.parse().map_err(|_| GError::Other(format!(
+                "invalid defrag.min_free_pct value \"{value}\" (expected 0-100)")))?;
+            if n > 100 {
+                return Err(GError::Other(format!(
+                    "defrag.min_free_pct {n} out of range (0-100)")));
+            }
+            Ok(())
+        }
+        "defrag.fragment_threshold_pct" => {
+            let n: u8 = value.parse().map_err(|_| GError::Other(format!(
+                "invalid defrag.fragment_threshold_pct value \"{value}\" (expected 0-100)")))?;
+            if n > 100 {
+                return Err(GError::Other(format!(
+                    "defrag.fragment_threshold_pct {n} out of range (0-100)")));
+            }
+            Ok(())
+        }
+        "defrag.max_extents" => {
+            let n: u32 = value.parse().map_err(|_| GError::Other(format!(
+                "invalid defrag.max_extents value \"{value}\" (expected non-negative integer)")))?;
+            // NTFS attribute-list hard limit is ~30; we cap at 30 to
+            // leave headroom for MFT metadata growth.
+            if n == 0 || n > 30 {
+                return Err(GError::Other(format!(
+                    "defrag.max_extents {n} out of range (1-30)")));
+            }
+            Ok(())
+        }
+        "defrag.throttle_mb" => {
+            value.parse::<u64>().map_err(|_| GError::Other(format!(
+                "invalid defrag.throttle_mb value \"{value}\" (expected non-negative integer)")))?;
+            Ok(())
+        }
+        "defrag.throttle_sleep_ms" => {
+            value.parse::<u64>().map_err(|_| GError::Other(format!(
+                "invalid defrag.throttle_sleep_ms value \"{value}\" (expected non-negative integer)")))?;
+            Ok(())
+        }
+        "defrag.consolidate" => {
+            if value != "true" && value != "false" {
+                return Err(GError::Other(format!(
+                    "invalid defrag.consolidate value \"{value}\" (expected true|false)")));
+            }
+            Ok(())
+        }
         _ => Ok(()), // unknown keys pass through
     }
 }
@@ -283,6 +374,12 @@ mod tests {
         assert_eq!(cfg.get("compact.algorithm"), "lzx");
         assert_eq!(cfg.get("compact.threads"), "0");
         assert_eq!(cfg.get("compact.auto_pause"), "true");
+        assert_eq!(cfg.get("defrag.min_free_pct"), "15");
+        assert_eq!(cfg.get("defrag.fragment_threshold_pct"), "5");
+        assert_eq!(cfg.get("defrag.max_extents"), "20");
+        assert_eq!(cfg.get("defrag.throttle_mb"), "500");
+        assert_eq!(cfg.get("defrag.throttle_sleep_ms"), "200");
+        assert_eq!(cfg.get("defrag.consolidate"), "true");
     }
 
     #[test]
@@ -305,6 +402,12 @@ mod tests {
         assert!(validate_key("compact.algorithm").is_ok());
         assert!(validate_key("compact.threads").is_ok());
         assert!(validate_key("compact.auto_pause").is_ok());
+        assert!(validate_key("defrag.min_free_pct").is_ok());
+        assert!(validate_key("defrag.fragment_threshold_pct").is_ok());
+        assert!(validate_key("defrag.max_extents").is_ok());
+        assert!(validate_key("defrag.throttle_mb").is_ok());
+        assert!(validate_key("defrag.throttle_sleep_ms").is_ok());
+        assert!(validate_key("defrag.consolidate").is_ok());
         assert!(validate_key("unknown.key").is_err());
     }
 
@@ -324,5 +427,35 @@ mod tests {
         assert!(validate_value("compact.threads", "abc").is_err());
         assert!(validate_value("compact.auto_pause", "true").is_ok());
         assert!(validate_value("compact.auto_pause", "maybe").is_err());
+        // defrag.* keys
+        assert!(validate_value("defrag.min_free_pct", "15").is_ok());
+        assert!(validate_value("defrag.min_free_pct", "0").is_ok());
+        assert!(validate_value("defrag.min_free_pct", "100").is_ok());
+        assert!(validate_value("defrag.min_free_pct", "101").is_err());
+        assert!(validate_value("defrag.min_free_pct", "abc").is_err());
+        assert!(validate_value("defrag.fragment_threshold_pct", "5").is_ok());
+        assert!(validate_value("defrag.fragment_threshold_pct", "200").is_err());
+        assert!(validate_value("defrag.max_extents", "20").is_ok());
+        assert!(validate_value("defrag.max_extents", "1").is_ok());
+        assert!(validate_value("defrag.max_extents", "0").is_err());
+        assert!(validate_value("defrag.max_extents", "31").is_err());
+        assert!(validate_value("defrag.throttle_mb", "500").is_ok());
+        assert!(validate_value("defrag.throttle_mb", "abc").is_err());
+        assert!(validate_value("defrag.throttle_sleep_ms", "200").is_ok());
+        assert!(validate_value("defrag.throttle_sleep_ms", "-1").is_err());
+        assert!(validate_value("defrag.consolidate", "true").is_ok());
+        assert!(validate_value("defrag.consolidate", "false").is_ok());
+        assert!(validate_value("defrag.consolidate", "maybe").is_err());
+    }
+
+    #[test]
+    fn defrag_accessors() {
+        let cfg = GimConfig { entries: HashMap::new(), source_path: PathBuf::new() };
+        assert_eq!(cfg.defrag_min_free_pct(), 15);
+        assert_eq!(cfg.defrag_fragment_threshold_pct(), 5);
+        assert_eq!(cfg.defrag_max_extents(), 20);
+        assert_eq!(cfg.defrag_throttle_mb(), 500);
+        assert_eq!(cfg.defrag_throttle_sleep_ms(), 200);
+        assert!(cfg.defrag_consolidate());
     }
 }
