@@ -157,6 +157,12 @@ fn run_windows(
 
     let media = detect_media_kind(&game.game_dir)?;
     println!("drive media: {} ({})", c.bold(media.as_str()), media_kind_desc(media));
+    let media = if opts.force && matches!(media, MediaKind::Unknown) {
+        println!("{}: media detection returned unknown; proceeding anyway due to --force (user confirms HDD)", c.yellow("warn"));
+        MediaKind::Hdd
+    } else {
+        media
+    };
     match media {
         MediaKind::Ssd | MediaKind::Unknown => {
             if !opts.allow_ssd {

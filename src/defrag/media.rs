@@ -71,6 +71,142 @@ const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_
 #[cfg(target_os = "windows")]
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D1400;
 
+// StorageDeviceProperty = 0 (used for bus-type fallback).
+#[cfg(target_os = "windows")]
+const STORAGE_DEVICE_PROPERTY: u32 = 0;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_UNKNOWN: u32 = 0;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SCSI: u32 = 1;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_ATAPI: u32 = 2;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_ATA: u32 = 3;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_1394: u32 = 4;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SSA: u32 = 5;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_FIBRE: u32 = 6;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_USB: u32 = 7;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_RAID: u32 = 8;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_ISCSI: u32 = 9;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SAS: u32 = 10;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SATA: u32 = 11;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SD: u32 = 12; // Secure Digital.
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_MMC: u32 = 13; // Multimedia Card.
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_VIRTUAL: u32 = 14;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_FILE_BACKED_VIRTUAL: u32 = 15;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_UFS: u32 = 16;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_SCM: u32 = 17;
+#[cfg(target_os = "windows")]
+const STORAGE_BUS_TYPE_NVME: u32 = 18;
+
+/// Bus type reported by
+/// [STORAGE_DEVICE_DESCRIPTOR::BusType](https://learn.microsoft.com/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BusType {
+    Unknown = STORAGE_BUS_TYPE_UNKNOWN,
+    Scsi = STORAGE_BUS_TYPE_SCSI,
+    Atapi = STORAGE_BUS_TYPE_ATAPI,
+    Ata = STORAGE_BUS_TYPE_ATA,
+    Ieee1394 = STORAGE_BUS_TYPE_1394,
+    Ssa = STORAGE_BUS_TYPE_SSA,
+    Fibre = STORAGE_BUS_TYPE_FIBRE,
+    Usb = STORAGE_BUS_TYPE_USB,
+    Raid = STORAGE_BUS_TYPE_RAID,
+    Iscsi = STORAGE_BUS_TYPE_ISCSI,
+    Sas = STORAGE_BUS_TYPE_SAS,
+    Sata = STORAGE_BUS_TYPE_SATA,
+    Sd = STORAGE_BUS_TYPE_SD,
+    Mmc = STORAGE_BUS_TYPE_MMC,
+    Virtual = STORAGE_BUS_TYPE_VIRTUAL,
+    FileBackedVirtual = STORAGE_BUS_TYPE_FILE_BACKED_VIRTUAL,
+    Ufs = STORAGE_BUS_TYPE_UFS,
+    Scm = STORAGE_BUS_TYPE_SCM,
+    Nvme = STORAGE_BUS_TYPE_NVME,
+}
+
+impl From<u32> for BusType {
+    fn from(v: u32) -> Self {
+        match v {
+            0 => Self::Unknown,
+            1 => Self::Scsi,
+            2 => Self::Atapi,
+            3 => Self::Ata,
+            4 => Self::Ieee1394,
+            5 => Self::Ssa,
+            6 => Self::Fibre,
+            7 => Self::Usb,
+            8 => Self::Raid,
+            9 => Self::Iscsi,
+            10 => Self::Sas,
+            11 => Self::Sata,
+            12 => Self::Sd,
+            13 => Self::Mmc,
+            14 => Self::Virtual,
+            15 => Self::FileBackedVirtual,
+            16 => Self::Ufs,
+            17 => Self::Scm,
+            18 => Self::Nvme,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<u8> for BusType {
+    fn from(v: u8) -> Self { Self::from(v as u32) }
+}
+
+impl From<u16> for BusType {
+    fn from(v: u16) -> Self { Self::from(v as u32) }
+}
+
+impl BusType {
+    /// Best-effort mapping from bus to likely media kind.
+    /// Returns [`None`] when the bus type gives no strong signal (USB, virtual,
+    /// ATA/ATAPI, etc.) — those remain [`MediaKind::Unknown`].
+    pub fn media_kind(self) -> Option<MediaKind> {
+        // Known HDD buses:
+        match self {
+            Self::Sata | Self::Scsi | Self::Sas | Self::Ata | Self::Atapi => Some(MediaKind::Hdd),
+            // Known solid-state / non-spinning buses:
+            Self::Nvme | Self::Ufs | Self::Scm | Self::Virtual | Self::Raid => Some(MediaKind::Ssd),
+            // USB / 1394 / Fibre / VHD / SD / MMC could be HDD or SSD — don't guess:
+            _ => None,
+        }
+    }
+}
+
+/// Header shared by every `STORAGE_DEVICE_DESCRIPTOR` queried with
+/// `IOCTL_STORAGE_QUERY_PROPERTY / StorageDeviceProperty`.
+///
+/// The descriptor sits in a single output buffer; we only need the first
+/// four fields for the bus-type fallback.
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct StorageDeviceDescriptorHeader {
+    version: u32,
+    size: u32,
+    device_type: u8,
+    device_type_modifier: u8,
+    bus_type: u8,
+    _pad: [u8; 5],
+}
+
 // PropertyId::StorageDeviceSeekPenaltyProperty = 3 (StorageDeviceProperty=0, StorageAdapterProperty=1,
 // StorageDeviceIdProperty=2, StorageDeviceSeekPenaltyProperty=3).
 #[cfg(target_os = "windows")]
@@ -204,11 +340,13 @@ use std::os::windows::ffi::OsStrExt;
             )
         };
         if ok == 0 {
-            // The IOCTL can fail on removable / network drives or non-NTFS
-            // volumes. Treat as unknown rather than erroring out — the
-            // command will surface this in the report and let the user
-            // decide (or --force).
-            return Ok(MediaKind::Unknown);
+            // The sought-penalty IOCTL can fail on certain drives / drivers
+            // (older USB-SATA bridges, some RAID/HBA setups, etc.) even when
+            // the device is an HDD. Fall back to StorageDeviceProperty and
+            // infer media kind from the bus type — SATA/SCSI/SAS/ATA are
+            // very likely HDDs; NVMe/UFS/SCM are SSDs. Other buses (USB,
+            // 1394, SD/MMC, virtual) can be either way, so we stay Unknown.
+            return Ok(fallback_bus(h));
         }
         Ok(if descriptor.incurs_seek_penalty != 0 {
             MediaKind::Hdd
@@ -220,6 +358,46 @@ use std::os::windows::ffi::OsStrExt;
     {
         let _ = path;
         Ok(MediaKind::Ssd)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn fallback_bus(h: *mut std::ffi::c_void) -> MediaKind {
+    let query = StoragePropertyQuery {
+        property_id: STORAGE_DEVICE_PROPERTY,
+        query_type: PROPERTY_STANDARD_QUERY,
+    };
+    // StorageDeviceProperty requires a reasonably-sized output buffer;
+    // the full STORAGE_DEVICE_DESCRIPTOR is larger than 12 bytes.
+    // 256 bytes is a safe on-stack choice that covers up through the
+    // bus_type field for virtually every Windows release.
+    let mut buf = [0u8; 256];
+    let mut ret: u32 = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            &query as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<StoragePropertyQuery>() as u32,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+            &mut ret,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return MediaKind::Unknown;
+    }
+    // STORAGE_DEVICE_DESCRIPTOR layout (offsets 0-based):
+    //   0..4  Version
+    //   4..8  Size
+    //   8     DeviceType
+    //   9     DeviceTypeModifier
+    //   10    BusType
+    let bus_type = buf[10];
+    match BusType::from(bus_type).media_kind() {
+        Some(kind) => kind,
+        None => MediaKind::Unknown,
     }
 }
 

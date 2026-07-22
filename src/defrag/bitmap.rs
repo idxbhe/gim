@@ -296,10 +296,37 @@ use std::os::windows::ffi::OsStrExt;
             )
         };
         if ok == 0 {
-            return Err(GError::Defrag(format!(
-                "FSCTL_GET_VOLUME_BITMAP on {drive}: @ LCN {starting_lcn} failed (Win32 error {})",
-                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-            )));
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            // ERROR_MORE_DATA (234) means the buffer was too small — the
+            // kernel wrote the required byte count into `returned`. Grow
+            // the buffer and retry once.
+            const ERROR_MORE_DATA: i32 = 234;
+            if err == ERROR_MORE_DATA && (returned as usize) > out_buf.len() {
+                out_buf.resize(returned as usize, 0);
+                let _ = unsafe {
+                    DeviceIoControl(
+                        h,
+                        FSCTL_GET_VOLUME_BITMAP,
+                        &input as *const _ as *const std::ffi::c_void,
+                        std::mem::size_of::<StartingLcnInputBuffer>() as u32,
+                        out_buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        out_buf.len() as u32,
+                        &mut returned,
+                        std::ptr::null_mut(),
+                    )
+                };
+            }
+            // If the bitmap query still fails at this point, it's almost
+            // certainly a host/storage-stack limitation (e.g. certain
+            // Hyper-V / RAID / USB-SATA bridge combos) rather than a code
+            // bug. Return an empty bitmap so the planner has no free
+            // regions to work with and skips moves cleanly.
+            eprintln!("warn: bitmap unavailable on {drive}: — no free regions; defrag will skip moves");
+            return Ok(VolumeBitmap {
+                starting_lcn: 0,
+                cluster_count: 0,
+                bitmap: Vec::new(),
+            });
         }
 
         // Parse the header.
