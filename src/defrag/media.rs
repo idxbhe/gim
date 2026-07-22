@@ -367,10 +367,7 @@ fn fallback_bus(h: *mut std::ffi::c_void) -> MediaKind {
         property_id: STORAGE_DEVICE_PROPERTY,
         query_type: PROPERTY_STANDARD_QUERY,
     };
-    // StorageDeviceProperty requires a reasonably-sized output buffer;
-    // the full STORAGE_DEVICE_DESCRIPTOR is larger than 12 bytes.
-    // 256 bytes is a safe on-stack choice that covers up through the
-    // bus_type field for virtually every Windows release.
+
     let mut buf = [0u8; 256];
     let mut ret: u32 = 0;
     let ok = unsafe {
@@ -386,14 +383,48 @@ fn fallback_bus(h: *mut std::ffi::c_void) -> MediaKind {
         )
     };
     if ok == 0 {
-        return MediaKind::Unknown;
+        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        const ERROR_MORE_DATA: i32 = 234;
+        if err != ERROR_MORE_DATA {
+            return MediaKind::Unknown;
+        }
+        let required = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+        if required == 0 || required > 64 * 1024 {
+            return MediaKind::Unknown;
+        }
+        let mut buf2 = vec![0u8; required];
+        let ok2 = unsafe {
+            DeviceIoControl(
+                h,
+                IOCTL_STORAGE_QUERY_PROPERTY,
+                &query as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<StoragePropertyQuery>() as u32,
+                buf2.as_mut_ptr() as *mut std::ffi::c_void,
+                buf2.len() as u32,
+                &mut ret,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok2 == 0 {
+            return MediaKind::Unknown;
+        }
+        return bus_type_from_descriptor(&buf2);
     }
+
+    bus_type_from_descriptor(&buf)
+}
+
+#[cfg(target_os = "windows")]
+fn bus_type_from_descriptor(buf: &[u8]) -> MediaKind {
     // STORAGE_DEVICE_DESCRIPTOR layout (offsets 0-based):
     //   0..4  Version
     //   4..8  Size
     //   8     DeviceType
     //   9     DeviceTypeModifier
     //   10    BusType
+    if buf.len() <= 10 {
+        return MediaKind::Unknown;
+    }
     let bus_type = buf[10];
     match BusType::from(bus_type).media_kind() {
         Some(kind) => kind,

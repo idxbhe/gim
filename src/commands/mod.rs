@@ -61,7 +61,7 @@ fn dispatch(cmd: &Command, c: &output::Colorizer, p: &ProgressReporter) -> GResu
         Command::Unpack { gim_file, output_dir, snapshot, track, threads, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, false, false, p),
         Command::Install { gim_file, output_dir, snapshot, track, threads, interactive, dry_run } => unpack::run(c, gim_file.clone(), output_dir.clone(), snapshot.clone(), *track, *threads, *dry_run, true, *interactive, p),
         Command::Compact { alias, algorithm, target, decompress, confirm, force, threads, exclude, background, status, dry_run, worker, lock_file } => compact::run(c, alias.clone(), algorithm.clone(), target.clone(), *decompress, *confirm, *force, *threads, exclude.clone().unwrap_or_default(), *background, *status, *dry_run, *worker, lock_file.clone(), p),
-        Command::Defrag { alias, target, confirm, force, allow_ssd, threads, exclude, dry_run } => defrag::run(c, alias.clone(), target.clone(), *confirm, *force, *allow_ssd, *threads, exclude.clone().unwrap_or_default(), *dry_run, p),
+        Command::Defrag { alias, target, confirm, force, allow_ssd, media, threads, exclude, dry_run } => defrag::run(c, alias.clone(), target.clone(), *confirm, *force, *allow_ssd, media.clone(), *threads, exclude.clone().unwrap_or_default(), *dry_run, p),
     }
 }
 

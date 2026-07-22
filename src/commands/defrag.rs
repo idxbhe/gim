@@ -50,6 +50,7 @@ pub fn run(
     confirm: bool,
     force: bool,
     allow_ssd: bool,
+    media: Option<String>,
     threads: Option<usize>,
     exclude: Vec<String>,
     dry_run: bool,
@@ -61,13 +62,13 @@ pub fn run(
     // failures.
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (c, alias, target, confirm, force, allow_ssd, threads, exclude, dry_run, progress);
+        let _ = (c, alias, target, confirm, force, allow_ssd, media, threads, exclude, dry_run, progress);
         return Err(GError::NotSupportedPlatform);
     }
 
     #[cfg(target_os = "windows")]
     {
-        run_windows(c, alias, target, confirm, force, allow_ssd, threads, exclude, dry_run, progress)
+        run_windows(c, alias, target, confirm, force, allow_ssd, media, threads, exclude, dry_run, progress)
     }
 }
 
@@ -79,6 +80,7 @@ fn run_windows(
     confirm: bool,
     force: bool,
     allow_ssd: bool,
+    media: Option<String>,
     threads: Option<usize>,
     exclude: Vec<String>,
     dry_run: bool,
@@ -155,7 +157,22 @@ fn run_windows(
     state.phase = DefragPhase::DetectingMedia.as_str().to_string();
     state.save(&state_path)?;
 
-    let media = detect_media_kind(&game.game_dir)?;
+    let media = match media.as_deref() {
+        Some("hdd" | "Hdd" | "HDD") => {
+            println!("{}: using user override: media=hdd", c.green("info"));
+            MediaKind::Hdd
+        }
+        Some("ssd" | "Ssd" | "SSD") => {
+            println!("{}: using user override: media=ssd", c.green("info"));
+            MediaKind::Ssd
+        }
+        Some("auto" | "Auto" | "AUTO") | None => detect_media_kind(&game.game_dir)?,
+        Some(other) => {
+            return Err(GError::Defrag(format!(
+                "unknown --media value \"{other}\" (supported: auto, hdd, ssd)"
+            )));
+        }
+    };
     println!("drive media: {} ({})", c.bold(media.as_str()), media_kind_desc(media));
     let media = if opts.force && matches!(media, MediaKind::Unknown) {
         println!("{}: media detection returned unknown; proceeding anyway due to --force (user confirms HDD)", c.yellow("warn"));

@@ -199,6 +199,9 @@ pub enum Command {
         /// moves issued) — this just overrides the "refuse SSD" guard.
         #[arg(long)]
         allow_ssd: bool,
+        /// Override media detection: auto (default), hdd, or ssd.
+        #[arg(long = "media", value_name = "KIND")]
+        media: Option<String>,
         /// Number of threads (default: 1; defrag is single-threaded for
         /// safety — multi-threaded cluster moves can deadlock with VSS).
         #[arg(long, short = 't')]
